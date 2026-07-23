@@ -1,0 +1,8 @@
+{
+  "name": "kaededaw",
+  "version-string": "5.0.0",
+  "dependencies": [
+    "taglib"
+  ],
+  "builtin-baseline": "97b19caab97ab0c8d36c93230046c8c45fcd41d0"
+}

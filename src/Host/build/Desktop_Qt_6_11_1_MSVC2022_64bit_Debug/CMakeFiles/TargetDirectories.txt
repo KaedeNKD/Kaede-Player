@@ -1,0 +1,3 @@
+F:/KaedeDAW_Workspace/src/Host/build/Desktop_Qt_6_11_1_MSVC2022_64bit_Debug/CMakeFiles/KaedeDAW_Host.dir
+F:/KaedeDAW_Workspace/src/Host/build/Desktop_Qt_6_11_1_MSVC2022_64bit_Debug/CMakeFiles/edit_cache.dir
+F:/KaedeDAW_Workspace/src/Host/build/Desktop_Qt_6_11_1_MSVC2022_64bit_Debug/CMakeFiles/rebuild_cache.dir
