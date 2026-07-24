@@ -6,13 +6,16 @@
 #include <QLibrary>
 #include <QFile>
 #include <QFileInfo>
-#include <algorithm> 
-#include <cstring>   
+#include <QStandardPaths>
+#include <QDateTime>
+#include <QTextStream>
+#include <algorithm>
+#include <cstring>
 #include <chrono>
 
 #ifdef _WIN32
 #include <avrt.h>
-#pragma comment(lib, "Avrt.lib") 
+#pragma comment(lib, "Avrt.lib")
 #undef min
 #undef max
 #endif
@@ -35,9 +38,31 @@ inline uint32_t xorshift32(uint32_t& state) {
     state ^= state << 13; state ^= state >> 17; state ^= state << 5; return state;
 }
 
+// 👑 手排檔核心：1-Byte 鏡像反轉 LUT (專治 XMOS DAC 拒吃 MSB 格式的傲嬌病)
+static const uint8_t BitReverseTable256[256] = {
+    0x00, 0x80, 0x40, 0xC0, 0x20, 0xA0, 0x60, 0xE0, 0x10, 0x90, 0x50, 0xD0, 0x30, 0xB0, 0x70, 0xF0,
+    0x08, 0x88, 0x48, 0xC8, 0x28, 0xA8, 0x68, 0xE8, 0x18, 0x98, 0x58, 0xD8, 0x38, 0xB8, 0x78, 0xF8,
+    0x04, 0x84, 0x44, 0xC4, 0x24, 0xA4, 0x64, 0xE4, 0x14, 0x94, 0x54, 0xD4, 0x34, 0xB4, 0x74, 0xF4,
+    0x0C, 0x8C, 0x4C, 0xCC, 0x2C, 0xAC, 0x6C, 0xEC, 0x1C, 0x9C, 0x5C, 0xDC, 0x3C, 0xBC, 0x7C, 0xFC,
+    0x02, 0x82, 0x42, 0xC2, 0x22, 0xA2, 0x62, 0xE2, 0x12, 0x92, 0x52, 0xD2, 0x32, 0xB2, 0x72, 0xF2,
+    0x0A, 0x8A, 0x4A, 0xCA, 0x2A, 0xAA, 0x6A, 0xEA, 0x1A, 0x9A, 0x5A, 0xDA, 0x3A, 0xBA, 0x7A, 0xFA,
+    0x06, 0x86, 0x46, 0xC6, 0x26, 0xA6, 0x66, 0xE6, 0x16, 0x96, 0x56, 0xD6, 0x36, 0xB6, 0x76, 0xF6,
+    0x0E, 0x8E, 0x4E, 0xCE, 0x2E, 0xAE, 0x6E, 0xEE, 0x1E, 0x9E, 0x5E, 0xDE, 0x3E, 0xBE, 0x7E, 0xFE,
+    0x01, 0x81, 0x41, 0xC1, 0x21, 0xA1, 0x61, 0xE1, 0x11, 0x91, 0x51, 0xD1, 0x31, 0xB1, 0x71, 0xF1,
+    0x09, 0x89, 0x49, 0xC9, 0x29, 0xA9, 0x69, 0xE9, 0x19, 0x99, 0x59, 0xD9, 0x39, 0xB9, 0x79, 0xF9,
+    0x05, 0x85, 0x45, 0xC5, 0x25, 0xA5, 0x65, 0xE5, 0x15, 0x95, 0x55, 0xD5, 0x35, 0xB5, 0x75, 0xF5,
+    0x0D, 0x8D, 0x4D, 0xCD, 0x2D, 0xAD, 0x6D, 0xED, 0x1D, 0x9D, 0x5D, 0xDD, 0x3D, 0xBD, 0x7D, 0xFD,
+    0x03, 0x83, 0x43, 0xC3, 0x23, 0xA3, 0x63, 0xE3, 0x13, 0x93, 0x53, 0xD3, 0x33, 0xB3, 0x73, 0xF3,
+    0x0B, 0x8B, 0x4B, 0xCB, 0x2B, 0xAB, 0x6B, 0xEB, 0x1B, 0x9B, 0x5B, 0xDB, 0x3B, 0xBB, 0x7B, 0xFB,
+    0x07, 0x87, 0x47, 0xC7, 0x27, 0xA7, 0x67, 0xE7, 0x17, 0x97, 0x57, 0xD7, 0x37, 0xB7, 0x77, 0xF7,
+    0x0F, 0x8F, 0x4F, 0xCF, 0x2F, 0xAF, 0x6F, 0xEF, 0x1F, 0x9F, 0x5F, 0xDF, 0x3F, 0xBF, 0x7F, 0xFF
+};
+static std::atomic<bool> g_isNativeDsdLsbReverse{false};
+static std::atomic<bool> g_dacIsLsb{false};
+
+
 // =======================================================================
-// 👑 獵鷹九號：SIMD 極速優化版 Polyphase Sinc 卷積升頻引擎 
-// (整合 2階/5階/9階 動態適應心理聲學矩陣)
+// 👑 獵鷹九號：SIMD 極速優化版 Polyphase Sinc 卷積升頻引擎
 // =======================================================================
 class KaedePolyphaseResampler {
 private:
@@ -45,11 +70,10 @@ private:
     std::vector<std::vector<double>> m_polyphaseFilter;
     std::vector<double> m_historyL; std::vector<double> m_historyR;
     int m_histIdx;
-    
-    // 👑 擴展至 9 階的殘差歷史暫存器
+
     double m_nsErrorL[9] = {0};
     double m_nsErrorR[9] = {0};
-    
+
     double besselI0(double x) {
         double sum = 1.0, term = 1.0;
         for (int i = 1; i <= 50; ++i) {
@@ -62,8 +86,8 @@ public:
     KaedePolyphaseResampler(int factor, int taps, double beta = 9.0) : m_factor(factor), m_taps(taps), m_histIdx(taps - 1) {
         if (m_factor < 1) m_factor = 1;
         m_polyphaseFilter.resize(m_factor, std::vector<double>(m_taps, 0.0));
-        m_historyL.resize(m_taps * 2, 0.0); m_historyR.resize(m_taps * 2, 0.0); 
-        
+        m_historyL.resize(m_taps * 2, 0.0); m_historyR.resize(m_taps * 2, 0.0);
+
         int halfTaps = m_taps / 2; double i0Beta = besselI0(beta);
         for (int phase = 0; phase < m_factor; ++phase) {
             double phaseOffset = static_cast<double>(phase) / m_factor;
@@ -75,7 +99,7 @@ public:
             }
         }
     }
-    
+
     int getFactor() const { return m_factor; }
 
     void reset() {
@@ -88,20 +112,19 @@ public:
 
     void process(const float* in, int inFrames, int channels, std::vector<float>& out, uint32_t& seed1, uint32_t& seed2, bool enableNS, int targetRate) {
         out.resize(inFrames * m_factor * channels);
-        const double FIR_HEADROOM = 0.70710678; 
+        const double FIR_HEADROOM = 0.70710678;
         const double LSB24 = 1.1920928955078125e-07;
         int outIdx = 0;
-        
-        // 👑 動態頻率判定與母帶係數矩陣分配
+
         int order = 2; const double* nsCoeffs = nullptr;
-        static const double c2[2] = {2.0, -1.0}; 
-        static const double c5[5] = {2.24, -2.39, 1.83, -0.81, 0.17}; // POW-R 2 Approximation
-        static const double c9[9] = {2.412, -2.970, 2.738, -2.033, 1.492, -0.890, 0.441, -0.164, 0.034}; // POW-R 3 Approximation
-        
-        if (targetRate >= 700000) { order = 2; nsCoeffs = c2; } 
-        else if (targetRate >= 350000) { order = 5; nsCoeffs = c5; } 
+        static const double c2[2] = {2.0, -1.0};
+        static const double c5[5] = {2.24, -2.39, 1.83, -0.81, 0.17};
+        static const double c9[9] = {2.412, -2.970, 2.738, -2.033, 1.492, -0.890, 0.441, -0.164, 0.034};
+
+        if (targetRate >= 700000) { order = 2; nsCoeffs = c2; }
+        else if (targetRate >= 350000) { order = 5; nsCoeffs = c5; }
         else { order = 9; nsCoeffs = c9; }
-        
+
         for (int i = 0; i < inFrames; ++i) {
             m_histIdx = (m_histIdx - 1 + m_taps) % m_taps;
             double inL = static_cast<double>(in[i * channels]);
@@ -117,50 +140,48 @@ public:
             for (int phase = 0; phase < m_factor; ++phase) {
                 double outL = 0.0; double outR = 0.0;
                 const double* pFilter = m_polyphaseFilter[phase].data();
-                
+
                 for (int k = 0; k < m_taps; ++k) outL += pHistL[k] * pFilter[k];
                 if (channels > 1) { for (int k = 0; k < m_taps; ++k) outR += pHistR[k] * pFilter[k]; }
-                
-                outL *= FIR_HEADROOM; 
+
+                outL *= FIR_HEADROOM;
                 if (channels > 1) outR *= FIR_HEADROOM;
-                
-                // --- Left Channel ---
-                double r1L = static_cast<double>(xorshift32(seed1)) / 4294967295.0; 
-                double r2L = static_cast<double>(xorshift32(seed2)) / 4294967295.0; 
+
+                double r1L = static_cast<double>(xorshift32(seed1)) / 4294967295.0;
+                double r2L = static_cast<double>(xorshift32(seed2)) / 4294967295.0;
                 double ditherL = (r1L - r2L) * LSB24;
-                
+
                 double shaped_errorL = 0.0;
                 if (enableNS) { for(int k = 0; k < order; ++k) shaped_errorL += m_nsErrorL[k] * nsCoeffs[k]; }
                 double ditheredL = outL + ditherL + shaped_errorL;
-                
+
                 float quantL = static_cast<float>(std::clamp(ditheredL, -1.0, 1.0));
                 out[outIdx++] = quantL;
-                
+
                 if (enableNS) {
                     double errL = ditheredL - static_cast<double>(quantL);
-                    if (std::isnan(errL) || std::isinf(errL) || std::abs(errL) > 1.0) { std::fill(m_nsErrorL, m_nsErrorL + 9, 0.0); } 
+                    if (std::isnan(errL) || std::isinf(errL) || std::abs(errL) > 1.0) { std::fill(m_nsErrorL, m_nsErrorL + 9, 0.0); }
                     else { for(int k = order - 1; k > 0; --k) m_nsErrorL[k] = m_nsErrorL[k-1]; m_nsErrorL[0] = errL; }
                 } else { std::fill(m_nsErrorL, m_nsErrorL + 9, 0.0); }
-                
-                // --- Right Channel ---
-                if (channels > 1) { 
-                    double r1R = static_cast<double>(xorshift32(seed1)) / 4294967295.0; 
-                    double r2R = static_cast<double>(xorshift32(seed2)) / 4294967295.0; 
+
+                if (channels > 1) {
+                    double r1R = static_cast<double>(xorshift32(seed1)) / 4294967295.0;
+                    double r2R = static_cast<double>(xorshift32(seed2)) / 4294967295.0;
                     double ditherR = (r1R - r2R) * LSB24;
-                    
+
                     double shaped_errorR = 0.0;
                     if (enableNS) { for(int k = 0; k < order; ++k) shaped_errorR += m_nsErrorR[k] * nsCoeffs[k]; }
                     double ditheredR = outR + ditherR + shaped_errorR;
-                    
+
                     float quantR = static_cast<float>(std::clamp(ditheredR, -1.0, 1.0));
                     out[outIdx++] = quantR;
-                    
+
                     if (enableNS) {
                         double errR = ditheredR - static_cast<double>(quantR);
-                        if (std::isnan(errR) || std::isinf(errR) || std::abs(errR) > 1.0) { std::fill(m_nsErrorR, m_nsErrorR + 9, 0.0); } 
+                        if (std::isnan(errR) || std::isinf(errR) || std::abs(errR) > 1.0) { std::fill(m_nsErrorR, m_nsErrorR + 9, 0.0); }
                         else { for(int k = order - 1; k > 0; --k) m_nsErrorR[k] = m_nsErrorR[k-1]; m_nsErrorR[0] = errR; }
                     } else { std::fill(m_nsErrorR, m_nsErrorR + 9, 0.0); }
-                } 
+                }
             }
         }
     }
@@ -187,16 +208,32 @@ typedef BOOL (WINAPI *P_BASS_ASIO_ChannelJoin)(BOOL, DWORD, int);
 typedef BOOL (WINAPI *P_BASS_ASIO_ChannelSetFormat)(BOOL, DWORD, DWORD);
 typedef DWORD (WINAPI *P_BASS_ASIO_GetDevice)();
 typedef DWORD (WINAPI *P_BASS_ASIO_GetLatency)(BOOL);
+
+typedef BOOL (WINAPI *P_BASS_ASIO_ChannelEnableBASS)(BOOL, DWORD, DWORD, BOOL);
+typedef BOOL (WINAPI *P_BASS_ASIO_SetDSD)(BOOL);
+typedef BOOL (WINAPI *P_BASS_ASIO_CheckRate)(double);
+typedef DWORD (WINAPI *P_BASS_ASIO_ErrorGetCode)();
 typedef HSTREAM (WINAPI *P_BASS_DSD_StreamCreateFile)(BOOL, const void*, QWORD, QWORD, DWORD, DWORD);
 
 static P_BASS_WASAPI_Init dyn_BASS_WASAPI_Init = nullptr; static P_BASS_WASAPI_Free dyn_BASS_WASAPI_Free = nullptr; static P_BASS_WASAPI_GetDeviceInfo dyn_BASS_WASAPI_GetDeviceInfo = nullptr; static P_BASS_WASAPI_GetInfo dyn_BASS_WASAPI_GetInfo = nullptr; static P_BASS_WASAPI_Start dyn_BASS_WASAPI_Start = nullptr; static P_BASS_WASAPI_Stop dyn_BASS_WASAPI_Stop = nullptr; static P_BASS_WASAPI_GetDevice dyn_BASS_WASAPI_GetDevice = nullptr; static P_BASS_WASAPI_GetData dyn_BASS_WASAPI_GetData = nullptr;
 static P_BASS_ASIO_Init dyn_BASS_ASIO_Init = nullptr; static P_BASS_ASIO_Free dyn_BASS_ASIO_Free = nullptr; static P_BASS_ASIO_GetDeviceInfo dyn_BASS_ASIO_GetDeviceInfo = nullptr; static P_BASS_ASIO_GetInfo dyn_BASS_ASIO_GetInfo = nullptr; static P_BASS_ASIO_SetRate dyn_BASS_ASIO_SetRate = nullptr; static P_BASS_ASIO_GetRate dyn_BASS_ASIO_GetRate = nullptr; static P_BASS_ASIO_Start dyn_BASS_ASIO_Start = nullptr; static P_BASS_ASIO_Stop dyn_BASS_ASIO_Stop = nullptr; static P_BASS_ASIO_ChannelEnable dyn_BASS_ASIO_ChannelEnable = nullptr; static P_BASS_ASIO_ChannelJoin dyn_BASS_ASIO_ChannelJoin = nullptr; static P_BASS_ASIO_ChannelSetFormat dyn_BASS_ASIO_ChannelSetFormat = nullptr; static P_BASS_ASIO_GetDevice dyn_BASS_ASIO_GetDevice = nullptr; static P_BASS_ASIO_GetLatency dyn_BASS_ASIO_GetLatency = nullptr;
+
+static P_BASS_ASIO_SetDSD dyn_BASS_ASIO_SetDSD = nullptr;
+static P_BASS_ASIO_CheckRate dyn_BASS_ASIO_CheckRate = nullptr;
+static P_BASS_ASIO_ErrorGetCode dyn_BASS_ASIO_ErrorGetCode = nullptr;
+
 static P_BASS_DSD_StreamCreateFile dyn_BASS_DSD_StreamCreateFile = nullptr;
 
 static void LoadDynamicBassPlugins() {
     static bool isLoaded = false; if (isLoaded) return;
     QLibrary wasapi("basswasapi"); if (wasapi.load()) { dyn_BASS_WASAPI_Init = (P_BASS_WASAPI_Init)wasapi.resolve("BASS_WASAPI_Init"); dyn_BASS_WASAPI_Free = (P_BASS_WASAPI_Free)wasapi.resolve("BASS_WASAPI_Free"); dyn_BASS_WASAPI_GetDeviceInfo = (P_BASS_WASAPI_GetDeviceInfo)wasapi.resolve("BASS_WASAPI_GetDeviceInfo"); dyn_BASS_WASAPI_GetInfo = (P_BASS_WASAPI_GetInfo)wasapi.resolve("BASS_WASAPI_GetInfo"); dyn_BASS_WASAPI_Start = (P_BASS_WASAPI_Start)wasapi.resolve("BASS_WASAPI_Start"); dyn_BASS_WASAPI_Stop = (P_BASS_WASAPI_Stop)wasapi.resolve("BASS_WASAPI_Stop"); dyn_BASS_WASAPI_GetDevice = (P_BASS_WASAPI_GetDevice)wasapi.resolve("BASS_WASAPI_GetDevice"); dyn_BASS_WASAPI_GetData = (P_BASS_WASAPI_GetData)wasapi.resolve("BASS_WASAPI_GetData"); }
-    QLibrary asio("bassasio"); if (asio.load()) { dyn_BASS_ASIO_Init = (P_BASS_ASIO_Init)asio.resolve("BASS_ASIO_Init"); dyn_BASS_ASIO_Free = (P_BASS_ASIO_Free)asio.resolve("BASS_ASIO_Free"); dyn_BASS_ASIO_GetDeviceInfo = (P_BASS_ASIO_GetDeviceInfo)asio.resolve("BASS_ASIO_GetDeviceInfo"); dyn_BASS_ASIO_GetInfo = (P_BASS_ASIO_GetInfo)asio.resolve("BASS_ASIO_GetInfo"); dyn_BASS_ASIO_SetRate = (P_BASS_ASIO_SetRate)asio.resolve("BASS_ASIO_SetRate"); dyn_BASS_ASIO_GetRate = (P_BASS_ASIO_GetRate)asio.resolve("BASS_ASIO_GetRate"); dyn_BASS_ASIO_Start = (P_BASS_ASIO_Start)asio.resolve("BASS_ASIO_Start"); dyn_BASS_ASIO_Stop = (P_BASS_ASIO_Stop)asio.resolve("BASS_ASIO_Stop"); dyn_BASS_ASIO_ChannelEnable = (P_BASS_ASIO_ChannelEnable)asio.resolve("BASS_ASIO_ChannelEnable"); dyn_BASS_ASIO_ChannelJoin = (P_BASS_ASIO_ChannelJoin)asio.resolve("BASS_ASIO_ChannelJoin"); dyn_BASS_ASIO_ChannelSetFormat = (P_BASS_ASIO_ChannelSetFormat)asio.resolve("BASS_ASIO_ChannelSetFormat"); dyn_BASS_ASIO_GetDevice = (P_BASS_ASIO_GetDevice)asio.resolve("BASS_ASIO_GetDevice"); dyn_BASS_ASIO_GetLatency = (P_BASS_ASIO_GetLatency)asio.resolve("BASS_ASIO_GetLatency"); }
+    QLibrary asio("bassasio"); if (asio.load()) {
+        dyn_BASS_ASIO_Init = (P_BASS_ASIO_Init)asio.resolve("BASS_ASIO_Init"); dyn_BASS_ASIO_Free = (P_BASS_ASIO_Free)asio.resolve("BASS_ASIO_Free"); dyn_BASS_ASIO_GetDeviceInfo = (P_BASS_ASIO_GetDeviceInfo)asio.resolve("BASS_ASIO_GetDeviceInfo"); dyn_BASS_ASIO_GetInfo = (P_BASS_ASIO_GetInfo)asio.resolve("BASS_ASIO_GetInfo"); dyn_BASS_ASIO_SetRate = (P_BASS_ASIO_SetRate)asio.resolve("BASS_ASIO_SetRate"); dyn_BASS_ASIO_GetRate = (P_BASS_ASIO_GetRate)asio.resolve("BASS_ASIO_GetRate"); dyn_BASS_ASIO_Start = (P_BASS_ASIO_Start)asio.resolve("BASS_ASIO_Start"); dyn_BASS_ASIO_Stop = (P_BASS_ASIO_Stop)asio.resolve("BASS_ASIO_Stop"); dyn_BASS_ASIO_ChannelEnable = (P_BASS_ASIO_ChannelEnable)asio.resolve("BASS_ASIO_ChannelEnable"); dyn_BASS_ASIO_ChannelJoin = (P_BASS_ASIO_ChannelJoin)asio.resolve("BASS_ASIO_ChannelJoin"); dyn_BASS_ASIO_ChannelSetFormat = (P_BASS_ASIO_ChannelSetFormat)asio.resolve("BASS_ASIO_ChannelSetFormat"); dyn_BASS_ASIO_GetDevice = (P_BASS_ASIO_GetDevice)asio.resolve("BASS_ASIO_GetDevice"); dyn_BASS_ASIO_GetLatency = (P_BASS_ASIO_GetLatency)asio.resolve("BASS_ASIO_GetLatency");
+
+        dyn_BASS_ASIO_SetDSD = (P_BASS_ASIO_SetDSD)asio.resolve("BASS_ASIO_SetDSD");
+        dyn_BASS_ASIO_CheckRate = (P_BASS_ASIO_CheckRate)asio.resolve("BASS_ASIO_CheckRate");
+        dyn_BASS_ASIO_ErrorGetCode = (P_BASS_ASIO_ErrorGetCode)asio.resolve("BASS_ASIO_ErrorGetCode");
+    }
     QLibrary dsd("bassdsd"); if (dsd.load()) { dyn_BASS_DSD_StreamCreateFile = (P_BASS_DSD_StreamCreateFile)dsd.resolve("BASS_DSD_StreamCreateFile"); }
     isLoaded = true;
 }
@@ -206,11 +243,11 @@ static DWORD CALLBACK AsioProc(BOOL input, DWORD channel, void *buffer, DWORD le
 static void CALLBACK SharedDspProc(HDSP handle, DWORD channel, void *buffer, DWORD length, void *user) { static_cast<KaedeAudioWorker*>(user)->processSharedDSP(buffer, length); }
 
 KaedeAudioWorker::KaedeAudioWorker(QObject* parent) : QObject(parent) {
-    m_peqConfig = std::make_shared<PeqConfig>(); 
-    m_pcmBuffer.resize(8192, 0.0f); m_fftBuffer.resize(1024, 0.0f); 
-    m_pcmRing.resize(1048576, 0.0f); 
-    m_spscBuffer = std::make_unique<SpscRingBuffer<float>>(4194304); 
-    m_firResampler = std::make_unique<KaedePolyphaseResampler>(8, 128); 
+    m_peqConfig = std::make_shared<PeqConfig>();
+    m_pcmBuffer.resize(8192, 0.0f); m_fftBuffer.resize(1024, 0.0f);
+    m_pcmRing.resize(1048576, 0.0f);
+    m_spscBuffer = std::make_unique<SpscRingBuffer<float>>(4194304);
+    m_firResampler = std::make_unique<KaedePolyphaseResampler>(8, 128);
     m_workerExtractBuffer.resize(65536, 0.0f);
 }
 
@@ -218,59 +255,59 @@ KaedeAudioWorker::~KaedeAudioWorker() {}
 
 void KaedeAudioWorker::initEngine() {
     LoadDynamicBassPlugins(); BASS_Init(0, 44100, 0, 0, nullptr); BASS_SetConfig(BASS_CONFIG_UPDATEPERIOD, 10);
-    if (m_outputMode == OutputMode::SharedMixer) { BASS_Init(m_deviceId, 44100, 0, 0, nullptr); } 
-    loadBassPlugins(); updateHardwareLatency(); 
+    if (m_outputMode == OutputMode::SharedMixer) { BASS_Init(m_deviceId, 44100, 0, 0, nullptr); }
+    loadBassPlugins(); updateHardwareLatency();
     m_analyzerRunning = true; m_analyzerThread = std::thread(&KaedeAudioWorker::analyzerLoop, this);
     m_resamplingRunning = true; m_resamplingThread = std::thread(&KaedeAudioWorker::resamplingLoop, this);
 }
 
-void KaedeAudioWorker::destroyEngine() { 
-    stopTrack(); 
+void KaedeAudioWorker::destroyEngine() {
+    stopTrack();
     m_analyzerRunning = false; m_resamplingRunning = false;
-    if (m_analyzerThread.joinable()) m_analyzerThread.join(); 
+    if (m_analyzerThread.joinable()) m_analyzerThread.join();
     if (m_resamplingThread.joinable()) m_resamplingThread.join();
-    if (dyn_BASS_ASIO_Free) dyn_BASS_ASIO_Free(); 
-    if (dyn_BASS_WASAPI_Free) dyn_BASS_WASAPI_Free(); 
-    BASS_Free(); 
+    if (dyn_BASS_ASIO_Free) dyn_BASS_ASIO_Free();
+    if (dyn_BASS_WASAPI_Free) dyn_BASS_WASAPI_Free();
+    BASS_Free();
 }
 
-void KaedeAudioWorker::loadBassPlugins() { 
-    QDir dir(QCoreApplication::applicationDirPath()); 
-    for (const QString& file : dir.entryList(QStringList() << "bass*.dll", QDir::Files)) { 
-        if (file.toLower() == "bass.dll") continue; 
-        BASS_PluginLoad(reinterpret_cast<const char*>(dir.absoluteFilePath(file).utf16()), BASS_UNICODE); 
-    } 
+void KaedeAudioWorker::loadBassPlugins() {
+    QDir dir(QCoreApplication::applicationDirPath());
+    for (const QString& file : dir.entryList(QStringList() << "bass*.dll", QDir::Files)) {
+        if (file.toLower() == "bass.dll") continue;
+        BASS_PluginLoad(reinterpret_cast<const char*>(dir.absoluteFilePath(file).utf16()), BASS_UNICODE);
+    }
 }
 
 void KaedeAudioWorker::updateHardwareLatency() {
-    if (m_outputMode == OutputMode::SharedMixer) { BASS_INFO bInfo; BASS_GetInfo(&bInfo); m_latencyMs.store(bInfo.latency); } 
-    else if (m_outputMode == OutputMode::WASAPI_Exclusive && dyn_BASS_WASAPI_GetInfo) { BASS_WASAPI_INFO wInfo; dyn_BASS_WASAPI_GetInfo(&wInfo); m_latencyMs.store(wInfo.buflen * 1000.0); } 
-    else if (m_outputMode == OutputMode::ASIO) { 
+    if (m_outputMode == OutputMode::SharedMixer) { BASS_INFO bInfo; BASS_GetInfo(&bInfo); m_latencyMs.store(bInfo.latency); }
+    else if (m_outputMode == OutputMode::WASAPI_Exclusive && dyn_BASS_WASAPI_GetInfo) { BASS_WASAPI_INFO wInfo; dyn_BASS_WASAPI_GetInfo(&wInfo); m_latencyMs.store(wInfo.buflen * 1000.0); }
+    else if (m_outputMode == OutputMode::ASIO) {
         if (dyn_BASS_ASIO_GetRate) {
             double rate = dyn_BASS_ASIO_GetRate();
             if (rate > 0.0) {
-                if (dyn_BASS_ASIO_GetLatency) { DWORD latSamples = dyn_BASS_ASIO_GetLatency(FALSE); m_latencyMs.store((latSamples / rate) * 1000.0); } 
+                if (dyn_BASS_ASIO_GetLatency) { DWORD latSamples = dyn_BASS_ASIO_GetLatency(FALSE); m_latencyMs.store((latSamples / rate) * 1000.0); }
                 else if (dyn_BASS_ASIO_GetInfo) { BASS_ASIO_INFO aInfo; dyn_BASS_ASIO_GetInfo(&aInfo); m_latencyMs.store((aInfo.bufmax / rate) * 1000.0); }
             }
-        } 
+        }
     }
 }
 
 QList<AudioDeviceInfo> KaedeAudioWorker::getDeviceListWorker(OutputMode mode) const {
     QList<AudioDeviceInfo> list;
-    if (mode == OutputMode::SharedMixer) { BASS_DEVICEINFO info; for (int i = 1; BASS_GetDeviceInfo(i, &info); i++) { if (info.flags & BASS_DEVICE_ENABLED) list.append({i, QString::fromUtf8(info.name), mode}); } } 
-    else if (mode == OutputMode::WASAPI_Exclusive && dyn_BASS_WASAPI_GetDeviceInfo) { BASS_WASAPI_DEVICEINFO info; for (int i = 0; dyn_BASS_WASAPI_GetDeviceInfo(i, &info); i++) { if ((info.flags & BASS_DEVICE_ENABLED) && !(info.flags & BASS_DEVICE_INPUT)) list.append({i, QString::fromUtf8(info.name), mode}); } } 
+    if (mode == OutputMode::SharedMixer) { BASS_DEVICEINFO info; for (int i = 1; BASS_GetDeviceInfo(i, &info); i++) { if (info.flags & BASS_DEVICE_ENABLED) list.append({i, QString::fromUtf8(info.name), mode}); } }
+    else if (mode == OutputMode::WASAPI_Exclusive && dyn_BASS_WASAPI_GetDeviceInfo) { BASS_WASAPI_DEVICEINFO info; for (int i = 0; dyn_BASS_WASAPI_GetDeviceInfo(i, &info); i++) { if ((info.flags & BASS_DEVICE_ENABLED) && !(info.flags & BASS_DEVICE_INPUT)) list.append({i, QString::fromUtf8(info.name), mode}); } }
     else if (mode == OutputMode::ASIO && dyn_BASS_ASIO_GetDeviceInfo) { BASS_ASIO_DEVICEINFO info; for (int i = 0; dyn_BASS_ASIO_GetDeviceInfo(i, &info); i++) { list.append({i, QString::fromUtf8(info.name), mode}); } }
     return list;
 }
 
-void KaedeAudioWorker::setOutputDeviceWorker(OutputMode mode, int deviceId) { 
-    bool wasPlaying = m_isPlaying; double currentPos = getCurrentPosition(); QString targetFile = m_currentFilePath; 
-    destroyEngine(); 
-    m_outputMode = mode; m_deviceId = deviceId; 
-    m_isHardwareInitialized.store(false); 
-    initEngine(); 
-    if (!targetFile.isEmpty()) { loadTrack(targetFile); seekTrack(currentPos); if (wasPlaying) playTrack(); } 
+void KaedeAudioWorker::setOutputDeviceWorker(OutputMode mode, int deviceId) {
+    bool wasPlaying = m_isPlaying; double currentPos = getCurrentPosition(); QString targetFile = m_currentFilePath;
+    destroyEngine();
+    m_outputMode = mode; m_deviceId = deviceId;
+    m_isHardwareInitialized.store(false);
+    initEngine();
+    if (!targetFile.isEmpty()) { loadTrack(targetFile); seekTrack(currentPos); if (wasPlaying) playTrack(); }
 }
 
 void KaedeAudioWorker::setDspCoreModeWorker(DspCoreMode mode) {
@@ -290,116 +327,259 @@ void KaedeAudioWorker::setAlienFirConfigWorker(int taps, int targetRate) {
     }
 }
 
+void KaedeAudioWorker::setDsdOutputModeWorker(DsdOutputMode mode) {
+    if (m_dsdOutputMode.load() == mode) return;
+    bool wasPlaying = m_isPlaying; double currentPos = getCurrentPosition();
+    m_dsdOutputMode.store(mode);
+    if (m_isDsdMode.load() && !m_currentFilePath.isEmpty()) {
+        loadTrack(m_currentFilePath); seekTrack(currentPos);
+        if (wasPlaying) playTrack();
+    }
+}
+
 bool KaedeAudioWorker::loadTrack(const QString& filePath) {
-    if (filePath.isEmpty()) return false; 
-    
+    if (filePath.isEmpty()) return false;
+
     m_isSeeking.store(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    
-    stopTrack(); 
-    
+
+    stopTrack();
+
     m_isSeeking.store(true);
     std::fill(m_stdNsErrorL, m_stdNsErrorL + 9, 0.0);
     std::fill(m_stdNsErrorR, m_stdNsErrorR + 9, 0.0);
-    
+
     m_currentFilePath = filePath;
     m_smoothedUnplayedMicroSec.store(0);
-    
+
     QString ext = QFileInfo(filePath).suffix().toLower();
     m_isDsdMode.store(ext == "dsf" || ext == "dff");
+    m_isAsioNativeDsd.store(false);
 
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly)) { m_isSeeking.store(false); return false; }
     qint64 fileSize = file.size(); m_ramAudioData.resize(fileSize); file.read(reinterpret_cast<char*>(m_ramAudioData.data()), fileSize); file.close();
 
-    DWORD flags = BASS_SAMPLE_FLOAT; 
+    DWORD flags = BASS_SAMPLE_FLOAT;
     if (m_outputMode != OutputMode::SharedMixer) flags |= BASS_STREAM_DECODE;
     if (m_isLooping && m_outputMode == OutputMode::SharedMixer) flags |= BASS_SAMPLE_LOOP;
-    
+
+    bool attemptNative = (m_isDsdMode.load() && m_outputMode == OutputMode::ASIO && m_dsdOutputMode.load() == DsdOutputMode::Native);
+
     if (m_isDsdMode.load() && dyn_BASS_DSD_StreamCreateFile) {
-        DWORD dsdFlags = flags; if (m_outputMode != OutputMode::SharedMixer) dsdFlags |= BASS_DSD_DOP; 
+        DWORD dsdFlags = flags;
+        if (m_outputMode != OutputMode::SharedMixer) {
+            if (attemptNative) {
+                dsdFlags &= ~BASS_SAMPLE_FLOAT;
+                dsdFlags |= BASS_DSD_RAW;
+            } else {
+                dsdFlags |= BASS_DSD_DOP;
+            }
+        }
         m_stream = dyn_BASS_DSD_StreamCreateFile(TRUE, m_ramAudioData.data(), 0, fileSize, dsdFlags, 0);
         m_shadowStream = dyn_BASS_DSD_StreamCreateFile(TRUE, m_ramAudioData.data(), 0, fileSize, BASS_SAMPLE_FLOAT | BASS_STREAM_DECODE, 0);
     } else {
-        m_stream = BASS_StreamCreateFile(TRUE, m_ramAudioData.data(), 0, fileSize, flags); 
+        m_stream = BASS_StreamCreateFile(TRUE, m_ramAudioData.data(), 0, fileSize, flags);
     }
     if (!m_stream) { m_isSeeking.store(false); return false; }
 
     m_dspHandle = BASS_ChannelSetDSP(m_stream, SharedDspProc, this, 0);
 
-    BASS_CHANNELINFO info; BASS_ChannelGetInfo(m_stream, &info); 
-    m_baseSampleRate.store(info.freq); m_channels.store(info.chans); 
+    BASS_CHANNELINFO info; BASS_ChannelGetInfo(m_stream, &info);
+    m_baseSampleRate.store(info.freq); m_channels.store(info.chans);
 
     int targetRate = info.freq;
-    
+
     if (!m_isDsdMode.load() && m_coreMode.load() == DspCoreMode::Alien_FIR_128 && m_outputMode != OutputMode::SharedMixer) {
         int requestedRate = m_userTargetRate.load();
         int alignedFactor = 1;
 
-        if (requestedRate == 0) { 
+        if (requestedRate == 0) {
             alignedFactor = 1;
-        } else if (requestedRate == -1) { 
-            int maxDacRate = 768000; 
-            while (info.freq * alignedFactor * 2 <= maxDacRate && alignedFactor < 32) alignedFactor *= 2; 
-        } else { 
+        } else if (requestedRate == -1) {
+            int maxDacRate = 768000;
+            while (info.freq * alignedFactor * 2 <= maxDacRate && alignedFactor < 32) alignedFactor *= 2;
+        } else {
             while (info.freq * alignedFactor * 2 <= requestedRate && alignedFactor < 32) alignedFactor *= 2;
         }
-        
-        targetRate = info.freq * alignedFactor; 
-        
+
+        targetRate = info.freq * alignedFactor;
+
         size_t safeBufferSize = static_cast<size_t>(targetRate * m_channels.load() * 3.0);
-        if (safeBufferSize < 1048576) safeBufferSize = 1048576; 
-        
+        if (safeBufferSize < 1048576) safeBufferSize = 1048576;
+
         std::lock_guard<std::mutex> lock(m_resamplerMutex);
         m_spscBuffer = std::make_unique<SpscRingBuffer<float>>(safeBufferSize);
-        m_firResampler = std::make_unique<KaedePolyphaseResampler>(alignedFactor, m_targetFirTaps.load()); 
+        m_firResampler = std::make_unique<KaedePolyphaseResampler>(alignedFactor, m_targetFirTaps.load());
     }
-    
+
     m_dacSampleRate.store(targetRate);
 
-    bool needHardwareReinit = (!m_isHardwareInitialized.load()) || (targetRate != m_lastDacSampleRate.load());
-
-    if (needHardwareReinit) {
-        if (m_outputMode == OutputMode::WASAPI_Exclusive) { 
+    if (m_outputMode == OutputMode::WASAPI_Exclusive) {
+        bool needHardwareReinit = (!m_isHardwareInitialized.load()) || (targetRate != m_lastDacSampleRate.load());
+        if (needHardwareReinit) {
             if (dyn_BASS_WASAPI_Free) { dyn_BASS_WASAPI_Free(); std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
-            if (dyn_BASS_WASAPI_Init) { 
-                BOOL ok = dyn_BASS_WASAPI_Init(m_deviceId, targetRate, info.chans, BASS_WASAPI_EXCLUSIVE | BASS_WASAPI_EVENT | 0x400000 | BASS_WASAPI_BUFFER, 0.1f, 0.0f, WasapiProc, this); 
-                if (!ok) dyn_BASS_WASAPI_Init(m_deviceId, targetRate, info.chans, BASS_WASAPI_EXCLUSIVE | BASS_WASAPI_AUTOFORMAT | BASS_WASAPI_EVENT | 0x400000 | BASS_WASAPI_BUFFER, 0.1f, 0.0f, WasapiProc, this); 
-            } 
-            if (dyn_BASS_WASAPI_Start) dyn_BASS_WASAPI_Start(); 
-        } 
-        else if (m_outputMode == OutputMode::ASIO) { 
-            if (dyn_BASS_ASIO_Free) { dyn_BASS_ASIO_Free(); std::this_thread::sleep_for(std::chrono::milliseconds(400)); } 
-            if (dyn_BASS_ASIO_Init) { 
-                dyn_BASS_ASIO_Init(m_deviceId, BASS_ASIO_THREAD); 
-                if (dyn_BASS_ASIO_ChannelEnable) dyn_BASS_ASIO_ChannelEnable(FALSE, 0, AsioProc, this);
-                if (dyn_BASS_ASIO_ChannelJoin) dyn_BASS_ASIO_ChannelJoin(FALSE, 1, 0);
-                if (dyn_BASS_ASIO_ChannelSetFormat) dyn_BASS_ASIO_ChannelSetFormat(FALSE, 0, BASS_ASIO_FORMAT_FLOAT); 
-                if (dyn_BASS_ASIO_SetRate) dyn_BASS_ASIO_SetRate(targetRate);
-            } 
-            if (dyn_BASS_ASIO_Start) dyn_BASS_ASIO_Start(0, 0); 
+            if (dyn_BASS_WASAPI_Init) {
+                BOOL ok = dyn_BASS_WASAPI_Init(m_deviceId, targetRate, info.chans, BASS_WASAPI_EXCLUSIVE | BASS_WASAPI_EVENT | 0x400000 | BASS_WASAPI_BUFFER, 0.1f, 0.0f, WasapiProc, this);
+                if (!ok) dyn_BASS_WASAPI_Init(m_deviceId, targetRate, info.chans, BASS_WASAPI_EXCLUSIVE | BASS_WASAPI_AUTOFORMAT | BASS_WASAPI_EVENT | 0x400000 | BASS_WASAPI_BUFFER, 0.1f, 0.0f, WasapiProc, this);
+            }
+            if (dyn_BASS_WASAPI_Start) dyn_BASS_WASAPI_Start();
+            m_lastDacSampleRate.store(targetRate);
+            m_isHardwareInitialized.store(true);
         }
+    }
+    else if (m_outputMode == OutputMode::ASIO) {
+        // 👑 終極切歌防線：徹底切斷舊連結，防死鎖、防爆音
+        if (dyn_BASS_ASIO_ChannelEnable) dyn_BASS_ASIO_ChannelEnable(FALSE, 0, nullptr, nullptr);
+        if (dyn_BASS_ASIO_Stop) dyn_BASS_ASIO_Stop();
+
+        // 👑 只要是 ASIO 模式，換歌無條件重啟硬體狀態！
+        bool needHardwareReinit = (!m_isHardwareInitialized.load()) || (targetRate != m_lastDacSampleRate.load()) || (m_outputMode == OutputMode::ASIO);
+
+        if (needHardwareReinit) {
+            if (dyn_BASS_ASIO_SetDSD) dyn_BASS_ASIO_SetDSD(FALSE);
+
+            if (dyn_BASS_ASIO_Free) {
+                dyn_BASS_ASIO_Free();
+
+                // 👑 終極最後一公里：XMOS 繼電器物理保護！
+                // 如果上一次是超高頻 DSD (>768kHz)，這次切回一般 PCM，繼電器需要較長的物理復位時間。
+                // 給予 500ms 的絕對充裕時間，防止接下來的 PCM 初始化指令被硬體吞掉！
+                if (m_lastDacSampleRate.load() > 768000 && targetRate <= 768000) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                }
+            }
+            if (dyn_BASS_ASIO_Init) { dyn_BASS_ASIO_Init(m_deviceId, BASS_ASIO_THREAD); }
+        }
+
+        bool isAsioNativeSuccess = false;
+        bool fallbackToDoP = false;
+
+
+
+        if (attemptNative && dyn_BASS_ASIO_SetDSD && dyn_BASS_ASIO_ChannelSetFormat && dyn_BASS_ASIO_ChannelEnable) {
+            QString debugLog;
+            debugLog += QString("\n[%1] === KAEDE NATIVE DSD HANDSHAKE LOG (PURE PASSTHROUGH V1) ===\n").arg(QDateTime::currentDateTime().toString(Qt::ISODate));
+
+            bool setDsdOk = dyn_BASS_ASIO_SetDSD(TRUE);
+            debugLog += QString("SetDSD(TRUE) returned: %1\n").arg(setDsdOk);
+
+            if (setDsdOk) {
+                double bitRate = info.freq * 8.0;
+                double byteRate = info.freq;
+                double baseRate = info.freq / 8.0;
+
+                bool rateAligned = false;
+                if (dyn_BASS_ASIO_CheckRate && dyn_BASS_ASIO_SetRate) {
+                    if (dyn_BASS_ASIO_CheckRate(bitRate)) rateAligned = dyn_BASS_ASIO_SetRate(bitRate);
+                    else if (dyn_BASS_ASIO_CheckRate(baseRate)) rateAligned = dyn_BASS_ASIO_SetRate(baseRate);
+                    else if (dyn_BASS_ASIO_CheckRate(byteRate)) rateAligned = dyn_BASS_ASIO_SetRate(byteRate);
+                }
+                debugLog += QString("Rate Alignment returned: %1\n").arg(rateAligned);
+
+                if (rateAligned) {
+                    // 👑 手動掛載 AsioProc，不走黑箱
+                    bool enableOk = dyn_BASS_ASIO_ChannelEnable(FALSE, 0, AsioProc, this);
+                    debugLog += QString("ChannelEnable(AsioProc) returned: %1\n").arg(enableOk);
+
+                    if (enableOk) {
+                        dyn_BASS_ASIO_ChannelJoin(FALSE, 1, 0);
+
+                        // 👑 破案核心：BASS_DSD_RAW 永遠輸出 MSB，無論檔案是 DSF 還是 DFF！
+                        // 絕對不能根據副檔名去猜，必須強迫 DAC 吃 MSB！如果 DAC 傲嬌只吃 LSB，我們才用 LUT 翻轉。
+                        if (dyn_BASS_ASIO_ChannelSetFormat(FALSE, 0, BASS_ASIO_FORMAT_DSD_MSB)) {
+                            g_dacIsLsb.store(false);
+                            g_isNativeDsdLsbReverse.store(false); // 兩邊都是 MSB，完美物理直通！
+                            isAsioNativeSuccess = true;
+                        } else if (dyn_BASS_ASIO_ChannelSetFormat(FALSE, 0, BASS_ASIO_FORMAT_DSD_LSB)) {
+                            g_dacIsLsb.store(true);
+                            g_isNativeDsdLsbReverse.store(true); // DAC 只吃 LSB，啟動字典翻轉來伺候它！
+                            isAsioNativeSuccess = true;
+                        }
+
+                        if (isAsioNativeSuccess) {
+                            m_isAsioNativeDsd.store(true);
+                            debugLog += QString("Format Handshake SUCCESS! Native DSD Active! (DAC is %1)\n").arg(g_dacIsLsb.load() ? "LSB" : "MSB");
+                        } else {
+                            dyn_BASS_ASIO_ChannelEnable(FALSE, 0, nullptr, nullptr);
+                            debugLog += "Format Set failed. Unmounted.\n";
+                        }
+                    }
+                }
+            }
+
+            if (!isAsioNativeSuccess) {
+                fallbackToDoP = true;
+                m_isAsioNativeDsd.store(false);
+                debugLog += "=> NATIVE DSD HANDSHAKE FAILED. FALLING BACK TO DoP.\n";
+
+                dyn_BASS_ASIO_Free();
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                dyn_BASS_ASIO_Init(m_deviceId, BASS_ASIO_THREAD);
+            }
+
+
+        } else {
+            m_isAsioNativeDsd.store(false);
+        }
+
+        if (fallbackToDoP) {
+            if (dyn_BASS_ASIO_SetDSD) dyn_BASS_ASIO_SetDSD(FALSE);
+            if (m_dspHandle) { BASS_ChannelRemoveDSP(m_stream, m_dspHandle); m_dspHandle = 0; }
+            BASS_StreamFree(m_stream);
+
+            DWORD dopFlags = flags | BASS_DSD_DOP | BASS_SAMPLE_FLOAT;
+            m_stream = dyn_BASS_DSD_StreamCreateFile(TRUE, m_ramAudioData.data(), 0, fileSize, dopFlags, 0);
+
+            BASS_ChannelGetInfo(m_stream, &info);
+            m_baseSampleRate.store(info.freq);
+            m_channels.store(info.chans);
+            targetRate = info.freq;
+
+            if (dyn_BASS_ASIO_SetRate) dyn_BASS_ASIO_SetRate(targetRate);
+            if (dyn_BASS_ASIO_ChannelEnable) dyn_BASS_ASIO_ChannelEnable(FALSE, 0, AsioProc, this);
+            if (dyn_BASS_ASIO_ChannelJoin) dyn_BASS_ASIO_ChannelJoin(FALSE, 1, 0);
+            if (dyn_BASS_ASIO_ChannelSetFormat) dyn_BASS_ASIO_ChannelSetFormat(FALSE, 0, BASS_ASIO_FORMAT_FLOAT);
+
+        } else if (!isAsioNativeSuccess) {
+            if (dyn_BASS_ASIO_SetDSD) dyn_BASS_ASIO_SetDSD(FALSE);
+
+            // 👑 確保 PCM 的 Sample Rate 絕對有被硬體吃進去
+            if (dyn_BASS_ASIO_CheckRate && dyn_BASS_ASIO_SetRate) {
+                if (dyn_BASS_ASIO_CheckRate(targetRate)) dyn_BASS_ASIO_SetRate(targetRate);
+                else dyn_BASS_ASIO_SetRate(targetRate); // 就算沒過也暴力推一次
+            }
+
+            if (dyn_BASS_ASIO_ChannelEnable) dyn_BASS_ASIO_ChannelEnable(FALSE, 0, AsioProc, this);
+            if (dyn_BASS_ASIO_ChannelJoin) dyn_BASS_ASIO_ChannelJoin(FALSE, 1, 0);
+            if (dyn_BASS_ASIO_ChannelSetFormat) dyn_BASS_ASIO_ChannelSetFormat(FALSE, 0, BASS_ASIO_FORMAT_FLOAT);
+        }
+
+        if (dyn_BASS_ASIO_Start) dyn_BASS_ASIO_Start(0, 0);
+
         m_lastDacSampleRate.store(targetRate);
         m_isHardwareInitialized.store(true);
     }
 
     if (m_outputMode == OutputMode::SharedMixer && !m_isDsdMode.load()) {
-        BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_VOL, static_cast<float>(m_volume64.load())); 
+        BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_VOL, static_cast<float>(m_volume64.load()));
     }
-    updateHardwareLatency(); 
-    m_duration = BASS_ChannelBytes2Seconds(m_stream, BASS_ChannelGetLength(m_stream, BASS_POS_BYTE)); 
-    
+    updateHardwareLatency();
+    m_duration = BASS_ChannelBytes2Seconds(m_stream, BASS_ChannelGetLength(m_stream, BASS_POS_BYTE));
+
     m_cfStateL = 0.0; m_cfStateR = 0.0;
-    
-    if (m_spscBuffer) m_spscBuffer->reset(); 
+
+    if (m_spscBuffer) m_spscBuffer->reset();
     if (m_firResampler) m_firResampler->reset();
-    
+
     if (!m_isDsdMode.load() && m_coreMode.load() == DspCoreMode::Alien_FIR_128 && m_outputMode != OutputMode::SharedMixer) {
         m_isBuffering.store(true);
         QMetaObject::invokeMethod(this, "emitBufferingStart", Qt::QueuedConnection);
     }
-    
-    m_isSeeking.store(false); 
+
+    m_isSeeking.store(false);
     return true;
 }
 
@@ -417,27 +597,26 @@ void KaedeAudioWorker::resamplingLoop() {
                 std::lock_guard<std::mutex> lock(m_resamplerMutex);
                 if (m_firResampler) { factor = m_firResampler->getFactor(); channels = m_channels.load(); }
             }
-            
+
             size_t floatsNeededToSafelyWrite = 4096 * factor * channels;
-            
+
             if (m_spscBuffer->write_available() >= floatsNeededToSafelyWrite) {
                 int bytesToRead = 4096 * channels * sizeof(float);
                 DWORD readBytes = BASS_ChannelGetData(m_stream, m_workerExtractBuffer.data(), bytesToRead);
-                
+
                 if (readBytes != (DWORD)-1 && readBytes > 0) {
                     int framesRead = readBytes / (channels * sizeof(float));
                     std::vector<float> upsampledData;
-                    bool runNS = m_noiseShapingEnabled.load(); 
-                    
+                    bool runNS = m_noiseShapingEnabled.load();
+
                     {
                         std::lock_guard<std::mutex> lock(m_resamplerMutex);
-                        // 👑 將 Target Rate 傳入核心，引爆動態矩陣
                         if (m_firResampler) m_firResampler->process(m_workerExtractBuffer.data(), framesRead, channels, upsampledData, m_ditherSeed1, m_ditherSeed2, runNS, targetRate);
                     }
                     if (!upsampledData.empty()) m_spscBuffer->write(upsampledData.data(), upsampledData.size());
                 } else if (readBytes == (DWORD)-1 || readBytes == 0) {
-                    if (m_isLooping) BASS_ChannelSetPosition(m_stream, 0, BASS_POS_BYTE); 
-                    else std::this_thread::sleep_for(std::chrono::milliseconds(10)); 
+                    if (m_isLooping) BASS_ChannelSetPosition(m_stream, 0, BASS_POS_BYTE);
+                    else std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             } else { std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
         } else { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
@@ -450,17 +629,51 @@ void KaedeAudioWorker::resamplingLoop() {
 
 DWORD KaedeAudioWorker::processAudioData(void *buffer, DWORD length) {
     if (!m_stream || !m_isPlaying.load()) {
-        std::memset(buffer, 0, length);
-        return length; 
+        if (m_isDsdMode.load() && m_outputMode == OutputMode::ASIO && m_isAsioNativeDsd.load()) {
+            uint8_t silenceByte = g_dacIsLsb.load() ? 0x96 : 0x69;
+            std::memset(buffer, silenceByte, length);
+        } else {
+            std::memset(buffer, 0, length);
+        }
+        return length;
     }
-    
+
+    // 👑 傳承 V1：純淨物理直通 + 深度通訊監視器
+    if (m_isDsdMode.load() && m_outputMode == OutputMode::ASIO && m_isAsioNativeDsd.load()) {
+        DWORD read = BASS_ChannelGetData(m_stream, buffer, length);
+
+
+
+        // 斷流靜音防護
+        if (read == (DWORD)-1 || read == 0) {
+            if (m_isLooping) {
+                BASS_ChannelSetPosition(m_stream, 0, BASS_POS_BYTE);
+                read = BASS_ChannelGetData(m_stream, buffer, length);
+            }
+            if (read == (DWORD)-1 || read == 0) {
+                uint8_t silenceByte = g_dacIsLsb.load() ? 0x96 : 0x69;
+                std::memset(buffer, silenceByte, length);
+                return length;
+            }
+        }
+
+        // 觸發防傲嬌雪花音字典反轉
+        if (g_isNativeDsdLsbReverse.load()) {
+            uint8_t* p = static_cast<uint8_t*>(buffer);
+            for (DWORD i = 0; i < read; ++i) {
+                p[i] = BitReverseTable256[p[i]];
+            }
+        }
+        return read;
+    }
+
     if (!m_isDsdMode.load() && m_coreMode.load() == DspCoreMode::Alien_FIR_128 && m_outputMode != OutputMode::SharedMixer) {
         float* fBuf = static_cast<float*>(buffer);
         size_t floatsNeeded = length / sizeof(float);
-        
+
         if (m_isBuffering.load()) {
-            std::memset(buffer, 0, length); 
-            
+            std::memset(buffer, 0, length);
+
             size_t requiredSafeMargin = static_cast<size_t>(m_dacSampleRate.load() * m_channels.load() * 0.8);
             if (m_spscBuffer->read_available() >= requiredSafeMargin || m_duration < 1.0) {
                 m_isBuffering.store(false);
@@ -471,24 +684,24 @@ DWORD KaedeAudioWorker::processAudioData(void *buffer, DWORD length) {
 
         size_t readCount = 0;
         if (m_spscBuffer) readCount = m_spscBuffer->read(fBuf, floatsNeeded);
-        if (readCount < floatsNeeded) std::fill(fBuf + readCount, fBuf + floatsNeeded, 0.0f); 
-        return length; 
+        if (readCount < floatsNeeded) std::fill(fBuf + readCount, fBuf + floatsNeeded, 0.0f);
+        return length;
     }
-    
+
     DWORD read = BASS_ChannelGetData(m_stream, buffer, length);
-    if (read == (DWORD)-1 || read == 0) { 
-        if (m_isLooping) { BASS_ChannelSetPosition(m_stream, 0, BASS_POS_BYTE); read = BASS_ChannelGetData(m_stream, buffer, length); } 
-        else { 
+    if (read == (DWORD)-1 || read == 0) {
+        if (m_isLooping) { BASS_ChannelSetPosition(m_stream, 0, BASS_POS_BYTE); read = BASS_ChannelGetData(m_stream, buffer, length); }
+        else {
             std::memset(buffer, 0, length);
-            return length; 
+            return length;
         }
     }
-    return read; 
+    return read;
 }
 
 void KaedeAudioWorker::updatePeqConfigWorker(bool masterEnabled, const std::vector<DspBiquad>& filters, bool bypassed, double preampLinear, double wetRatio) {
     auto newConfig = std::make_shared<PeqConfig>();
-    newConfig->masterEnabled = masterEnabled; newConfig->filters = filters; newConfig->bypassed = bypassed; newConfig->preampLinear = preampLinear; newConfig->wetRatio = wetRatio; 
+    newConfig->masterEnabled = masterEnabled; newConfig->filters = filters; newConfig->bypassed = bypassed; newConfig->preampLinear = preampLinear; newConfig->wetRatio = wetRatio;
     std::atomic_store(&m_peqConfig, newConfig);
 }
 
@@ -499,14 +712,14 @@ void KaedeAudioWorker::processSharedDSP(void *buffer, DWORD length) {
     if (m_isDsdMode.load() && m_outputMode != OutputMode::SharedMixer) return;
 
     float* fBuf = static_cast<float*>(buffer); int floatCount = length / sizeof(float);
-    int chans = m_channels.load(); 
+    int chans = m_channels.load();
     double vol64 = (m_outputMode == OutputMode::SharedMixer) ? 1.0 : m_volume64.load();
     std::shared_ptr<PeqConfig> currentConfig = std::atomic_load(&m_peqConfig);
-    
+
     bool masterBypass = !currentConfig || !currentConfig->masterEnabled;
     bool runEq = !masterBypass && !currentConfig->bypassed && !currentConfig->filters.empty();
     double preamp = runEq ? currentConfig->preampLinear : 1.0;
-    double wetRatio = masterBypass ? 0.0 : currentConfig->wetRatio; 
+    double wetRatio = masterBypass ? 0.0 : currentConfig->wetRatio;
 
     if (runEq && m_peqStates.size() != currentConfig->filters.size()) { m_peqStates.assign(currentConfig->filters.size(), PeqState()); }
 
@@ -541,55 +754,51 @@ void KaedeAudioWorker::processSharedDSP(void *buffer, DWORD length) {
                 }
             }
         }
-        
+
         double dL = dryL * (1.0 - wetRatio) + wetL * wetRatio;
         double dR = dryR * (1.0 - wetRatio) + wetR * wetRatio;
-        
-        // 👑 Standard_64 (44.1k/48k 等原生直通) 專屬 9階 噪聲整形
+
         if (m_coreMode.load() == DspCoreMode::Standard_64) {
             bool runNS = m_noiseShapingEnabled.load();
             int targetRate = m_baseSampleRate.load();
-            
-            // 獨立的頻率判斷矩陣
+
             int order = 2; const double* nsCoeffs = nullptr;
-            static const double c2[2] = {2.0, -1.0}; 
-            static const double c5[5] = {2.24, -2.39, 1.83, -0.81, 0.17}; 
-            static const double c9[9] = {2.412, -2.970, 2.738, -2.033, 1.492, -0.890, 0.441, -0.164, 0.034}; 
-            
-            if (targetRate >= 700000) { order = 2; nsCoeffs = c2; } 
-            else if (targetRate >= 350000) { order = 5; nsCoeffs = c5; } 
+            static const double c2[2] = {2.0, -1.0};
+            static const double c5[5] = {2.24, -2.39, 1.83, -0.81, 0.17};
+            static const double c9[9] = {2.412, -2.970, 2.738, -2.033, 1.492, -0.890, 0.441, -0.164, 0.034};
+
+            if (targetRate >= 700000) { order = 2; nsCoeffs = c2; }
+            else if (targetRate >= 350000) { order = 5; nsCoeffs = c5; }
             else { order = 9; nsCoeffs = c9; }
-            
-            // --- Left Channel ---
-            double r1L = static_cast<double>(xorshift32(m_ditherSeed1)) / 4294967295.0; 
-            double r2L = static_cast<double>(xorshift32(m_ditherSeed2)) / 4294967295.0; 
+
+            double r1L = static_cast<double>(xorshift32(m_ditherSeed1)) / 4294967295.0;
+            double r2L = static_cast<double>(xorshift32(m_ditherSeed2)) / 4294967295.0;
             double ditherL = (r1L - r2L) * LSB24;
-            
+
             double shaped_errorL = 0.0;
             if (runNS) { for(int k = 0; k < order; ++k) shaped_errorL += m_stdNsErrorL[k] * nsCoeffs[k]; }
             double ditheredL = dL + ditherL + shaped_errorL;
-            
+
             float quantL = static_cast<float>(std::clamp(ditheredL, -1.0, 1.0));
-            
+
             if (runNS) {
                 double errL = ditheredL - static_cast<double>(quantL);
                 if (std::isnan(errL) || std::isinf(errL) || std::abs(errL) > 1.0) { std::fill(m_stdNsErrorL, m_stdNsErrorL + 9, 0.0); }
                 else { for(int k = order - 1; k > 0; --k) m_stdNsErrorL[k] = m_stdNsErrorL[k-1]; m_stdNsErrorL[0] = errL; }
             } else { std::fill(m_stdNsErrorL, m_stdNsErrorL + 9, 0.0); }
             dL = quantL;
-            
-            // --- Right Channel ---
-            if (chans > 1) { 
-                double r1R = static_cast<double>(xorshift32(m_ditherSeed1)) / 4294967295.0; 
-                double r2R = static_cast<double>(xorshift32(m_ditherSeed2)) / 4294967295.0; 
+
+            if (chans > 1) {
+                double r1R = static_cast<double>(xorshift32(m_ditherSeed1)) / 4294967295.0;
+                double r2R = static_cast<double>(xorshift32(m_ditherSeed2)) / 4294967295.0;
                 double ditherR = (r1R - r2R) * LSB24;
-                
+
                 double shaped_errorR = 0.0;
                 if (runNS) { for(int k = 0; k < order; ++k) shaped_errorR += m_stdNsErrorR[k] * nsCoeffs[k]; }
                 double ditheredR = dR + ditherR + shaped_errorR;
-                
+
                 float quantR = static_cast<float>(std::clamp(ditheredR, -1.0, 1.0));
-                
+
                 if (runNS) {
                     double errR = ditheredR - static_cast<double>(quantR);
                     if (std::isnan(errR) || std::isinf(errR) || std::abs(errR) > 1.0) { std::fill(m_stdNsErrorR, m_stdNsErrorR + 9, 0.0); }
@@ -598,7 +807,7 @@ void KaedeAudioWorker::processSharedDSP(void *buffer, DWORD length) {
                 dR = quantR;
             }
         } else {
-            dL = std::clamp(dL, -1.0, 1.0); 
+            dL = std::clamp(dL, -1.0, 1.0);
             dR = std::clamp(dR, -1.0, 1.0);
         }
 
@@ -608,94 +817,107 @@ void KaedeAudioWorker::processSharedDSP(void *buffer, DWORD length) {
     m_ringIndex.store(currentIdx, std::memory_order_release);
 }
 
-void KaedeAudioWorker::playTrack() { 
-    if (!m_stream || m_isPlaying) return; 
-    
-    if (m_outputMode == OutputMode::SharedMixer) BASS_ChannelPlay(m_stream, FALSE); 
-    
-    m_isPlaying.store(true); 
-    emit playbackStateChanged(true); 
+void KaedeAudioWorker::playTrack() {
+    if (!m_stream || m_isPlaying) return;
+
+    if (m_outputMode == OutputMode::SharedMixer) BASS_ChannelPlay(m_stream, FALSE);
+
+    m_isPlaying.store(true);
+    emit playbackStateChanged(true);
 }
 
-void KaedeAudioWorker::pauseTrack() { 
-    if (!m_stream || !m_isPlaying) return; 
-    
-    if (m_outputMode == OutputMode::SharedMixer) BASS_ChannelPause(m_stream); 
-    
-    m_isPlaying.store(false); 
-    emit playbackStateChanged(false); 
+void KaedeAudioWorker::pauseTrack() {
+    if (!m_stream || !m_isPlaying) return;
+
+    if (m_outputMode == OutputMode::SharedMixer) BASS_ChannelPause(m_stream);
+
+    m_isPlaying.store(false);
+    emit playbackStateChanged(false);
 }
 
-void KaedeAudioWorker::stopTrack() { 
-    if (!m_stream) return; 
-    
-    m_isSeeking.store(true); 
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    
-    std::lock_guard<std::mutex> lock(m_resamplerMutex);
-    
-    if (m_outputMode == OutputMode::SharedMixer) BASS_ChannelStop(m_stream); 
-    
-    if (m_dspHandle) { BASS_ChannelRemoveDSP(m_stream, m_dspHandle); m_dspHandle = 0; } 
-    if (m_shadowStream) { BASS_StreamFree(m_shadowStream); m_shadowStream = 0; } 
-    BASS_StreamFree(m_stream); m_stream = 0; 
-    
-    m_ramAudioData.clear(); m_ramAudioData.shrink_to_fit();
-    m_isPlaying.store(false); m_duration = 0.0; std::fill(m_pcmRing.begin(), m_pcmRing.end(), 0.0f); m_ringIndex.store(0); std::vector<float> emptyPcm(8192, 0.0f); std::vector<float> emptyFft(1024, -60.0f); emit dspDataReady(emptyPcm, emptyFft); emit playbackStateChanged(false); emit positionChanged(0.0, 0.0); 
-    
-    m_isBuffering.store(false); 
-    QMetaObject::invokeMethod(this, "emitBufferingDone", Qt::QueuedConnection);
-    m_smoothedUnplayedMicroSec.store(0); 
-    
-    std::fill(m_stdNsErrorL, m_stdNsErrorL + 9, 0.0);
-    std::fill(m_stdNsErrorR, m_stdNsErrorR + 9, 0.0);
-    
-    m_isSeeking.store(false); 
-}
+void KaedeAudioWorker::stopTrack() {
+    if (!m_stream) return;
 
-void KaedeAudioWorker::seekTrack(double targetSeconds) { 
-    if (!m_stream) return; 
-    
     m_isSeeking.store(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    
+
     std::lock_guard<std::mutex> lock(m_resamplerMutex);
-    
-    targetSeconds = qBound(0.0, targetSeconds, m_duration); 
-    BASS_ChannelSetPosition(m_stream, BASS_ChannelSeconds2Bytes(m_stream, targetSeconds), BASS_POS_BYTE); 
-    if (m_shadowStream) BASS_ChannelSetPosition(m_shadowStream, BASS_ChannelSeconds2Bytes(m_shadowStream, targetSeconds), BASS_POS_BYTE); 
-    std::fill(m_pcmRing.begin(), m_pcmRing.end(), 0.0f); m_ringIndex.store(0); 
-    if (m_spscBuffer) m_spscBuffer->reset(); 
-    if (m_firResampler) m_firResampler->reset();
-    
-    m_smoothedUnplayedMicroSec.store(0); 
-    
+
+    // 👑 靜音與防爆音機制的終極防線：先卸載通道，讓 DAC 安全收回控制權
+    if (m_outputMode == OutputMode::SharedMixer) {
+        BASS_ChannelStop(m_stream);
+    } else if (m_outputMode == OutputMode::ASIO) {
+        if (dyn_BASS_ASIO_ChannelEnable) dyn_BASS_ASIO_ChannelEnable(FALSE, 0, nullptr, nullptr);
+        if (dyn_BASS_ASIO_Stop) dyn_BASS_ASIO_Stop();
+
+        // 👑 停止播放時，強迫 DAC 退出 DSD 狀態
+        if (dyn_BASS_ASIO_SetDSD) dyn_BASS_ASIO_SetDSD(FALSE);
+        // 👑 最後一公里：立刻送出 PCM 基礎頻率，強迫 XMOS 實體繼電器立刻開始復位！
+        if (dyn_BASS_ASIO_SetRate) dyn_BASS_ASIO_SetRate(m_baseSampleRate.load());
+    } else if (m_outputMode == OutputMode::WASAPI_Exclusive) {
+        if (dyn_BASS_WASAPI_Stop) dyn_BASS_WASAPI_Stop(TRUE);
+    }
+
+    if (m_dspHandle) { BASS_ChannelRemoveDSP(m_stream, m_dspHandle); m_dspHandle = 0; }
+    if (m_shadowStream) { BASS_StreamFree(m_shadowStream); m_shadowStream = 0; }
+    BASS_StreamFree(m_stream); m_stream = 0;
+
+    m_ramAudioData.clear(); m_ramAudioData.shrink_to_fit();
+    m_isPlaying.store(false); m_duration = 0.0; std::fill(m_pcmRing.begin(), m_pcmRing.end(), 0.0f); m_ringIndex.store(0); std::vector<float> emptyPcm(8192, 0.0f); std::vector<float> emptyFft(1024, -60.0f); emit dspDataReady(emptyPcm, emptyFft); emit playbackStateChanged(false); emit positionChanged(0.0, 0.0);
+
+    m_isBuffering.store(false);
+    QMetaObject::invokeMethod(this, "emitBufferingDone", Qt::QueuedConnection);
+    m_smoothedUnplayedMicroSec.store(0);
+
     std::fill(m_stdNsErrorL, m_stdNsErrorL + 9, 0.0);
     std::fill(m_stdNsErrorR, m_stdNsErrorR + 9, 0.0);
-    
+
+    m_isSeeking.store(false);
+}
+
+void KaedeAudioWorker::seekTrack(double targetSeconds) {
+    if (!m_stream) return;
+
+    m_isSeeking.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    std::lock_guard<std::mutex> lock(m_resamplerMutex);
+
+    targetSeconds = qBound(0.0, targetSeconds, m_duration);
+    BASS_ChannelSetPosition(m_stream, BASS_ChannelSeconds2Bytes(m_stream, targetSeconds), BASS_POS_BYTE);
+    if (m_shadowStream) BASS_ChannelSetPosition(m_shadowStream, BASS_ChannelSeconds2Bytes(m_shadowStream, targetSeconds), BASS_POS_BYTE);
+    std::fill(m_pcmRing.begin(), m_pcmRing.end(), 0.0f); m_ringIndex.store(0);
+    if (m_spscBuffer) m_spscBuffer->reset();
+    if (m_firResampler) m_firResampler->reset();
+
+    m_smoothedUnplayedMicroSec.store(0);
+
+    std::fill(m_stdNsErrorL, m_stdNsErrorL + 9, 0.0);
+    std::fill(m_stdNsErrorR, m_stdNsErrorR + 9, 0.0);
+
     if (!m_isDsdMode.load() && m_coreMode.load() == DspCoreMode::Alien_FIR_128 && m_outputMode != OutputMode::SharedMixer) {
         m_isBuffering.store(true);
         QMetaObject::invokeMethod(this, "emitBufferingStart", Qt::QueuedConnection);
     }
-    
-    m_isSeeking.store(false); 
-    emit positionChanged(targetSeconds, m_duration); 
+
+    m_isSeeking.store(false);
+    emit positionChanged(targetSeconds, m_duration);
 }
 
 void KaedeAudioWorker::setVolume(double vol) { m_volume64.store(std::clamp(vol, 0.0, 1.0)); if (m_stream && m_outputMode == OutputMode::SharedMixer) BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_VOL, static_cast<float>(m_volume64.load())); }
 void KaedeAudioWorker::setLooping(bool loop) { m_isLooping = loop; if (m_stream && m_outputMode == OutputMode::SharedMixer) BASS_ChannelFlags(m_stream, loop ? BASS_SAMPLE_LOOP : 0, BASS_SAMPLE_LOOP); }
 
-double KaedeAudioWorker::getCurrentPosition() const { 
+double KaedeAudioWorker::getCurrentPosition() const {
     if (!m_stream) return 0.0;
-    double pos = BASS_ChannelBytes2Seconds(m_stream, BASS_ChannelGetPosition(m_stream, BASS_POS_BYTE)); 
+    double pos = BASS_ChannelBytes2Seconds(m_stream, BASS_ChannelGetPosition(m_stream, BASS_POS_BYTE));
     if (!m_isDsdMode.load() && m_coreMode.load() == DspCoreMode::Alien_FIR_128 && m_outputMode != OutputMode::SharedMixer) {
         size_t unplayedFloats = 0;
         if (m_spscBuffer) unplayedFloats = m_spscBuffer->read_available();
         double currentUnplayed = static_cast<double>(unplayedFloats) / (m_dacSampleRate.load() * m_channels.load());
-        
+
         double smoothedUnplayed = m_smoothedUnplayedMicroSec.load() / 1000000.0;
-        if (smoothedUnplayed == 0.0) smoothedUnplayed = currentUnplayed; 
-        
+        if (smoothedUnplayed == 0.0) smoothedUnplayed = currentUnplayed;
+
         double firGroupDelaySeconds = (m_targetFirTaps.load() / 2.0) / m_baseSampleRate.load();
         pos -= (smoothedUnplayed + firGroupDelaySeconds);
         if (pos < 0.0) pos = 0.0;
@@ -718,20 +940,20 @@ void KaedeAudioWorker::analyzerLoop() {
                 QWORD shadowPos = BASS_ChannelSeconds2Bytes(m_shadowStream, currSec); BASS_ChannelSetPosition(m_shadowStream, shadowPos, BASS_POS_BYTE); DWORD read = BASS_ChannelGetData(m_shadowStream, m_pcmBuffer.data(), 8192 * sizeof(float)); if (read != (DWORD)-1 && read > 0) { computeCustomFFT(m_pcmBuffer, m_fftBuffer); emit dspDataReady(m_pcmBuffer, m_fftBuffer); }
             } else {
                 long long latencyFloats = 0;
-                if (m_outputMode == OutputMode::SharedMixer) { DWORD availBytes = BASS_ChannelGetData(m_stream, nullptr, BASS_DATA_AVAILABLE); if (availBytes != (DWORD)-1) latencyFloats = availBytes / sizeof(float); } 
-                else if (m_outputMode == OutputMode::WASAPI_Exclusive) { if (dyn_BASS_WASAPI_GetData) { DWORD availBytes = dyn_BASS_WASAPI_GetData(nullptr, BASS_DATA_AVAILABLE); if (availBytes != (DWORD)-1) latencyFloats = availBytes / sizeof(float); } } 
+                if (m_outputMode == OutputMode::SharedMixer) { DWORD availBytes = BASS_ChannelGetData(m_stream, nullptr, BASS_DATA_AVAILABLE); if (availBytes != (DWORD)-1) latencyFloats = availBytes / sizeof(float); }
+                else if (m_outputMode == OutputMode::WASAPI_Exclusive) { if (dyn_BASS_WASAPI_GetData) { DWORD availBytes = dyn_BASS_WASAPI_GetData(nullptr, BASS_DATA_AVAILABLE); if (availBytes != (DWORD)-1) latencyFloats = availBytes / sizeof(float); } }
                 else if (m_outputMode == OutputMode::ASIO) { if (dyn_BASS_ASIO_GetLatency && dyn_BASS_ASIO_GetRate) { DWORD latSamples = dyn_BASS_ASIO_GetLatency(FALSE); double asioRate = dyn_BASS_ASIO_GetRate(); if (asioRate > 0) { double latSec = latSamples / asioRate; latencyFloats = static_cast<long long>(latSec * m_baseSampleRate.load()) * 2; } } }
-                
+
                 if (!m_isDsdMode.load() && m_coreMode.load() == DspCoreMode::Alien_FIR_128 && m_outputMode != OutputMode::SharedMixer) {
                     size_t unplayedFloats = 0;
                     if (m_spscBuffer) unplayedFloats = m_spscBuffer->read_available();
                     double currentUnplayed = static_cast<double>(unplayedFloats) / (m_dacSampleRate.load() * m_channels.load());
-                    
+
                     double lastUnplayed = m_smoothedUnplayedMicroSec.load() / 1000000.0;
                     if (lastUnplayed == 0.0 || std::abs(currentUnplayed - lastUnplayed) > 0.3) {
-                        lastUnplayed = currentUnplayed; 
+                        lastUnplayed = currentUnplayed;
                     } else {
-                        lastUnplayed += 0.08 * (currentUnplayed - lastUnplayed); 
+                        lastUnplayed += 0.08 * (currentUnplayed - lastUnplayed);
                     }
                     m_smoothedUnplayedMicroSec.store(static_cast<int64_t>(lastUnplayed * 1000000.0));
 
@@ -744,24 +966,24 @@ void KaedeAudioWorker::analyzerLoop() {
                     latencyFloats -= (latencyFloats % chans);
                 }
 
-                long long writeHead = m_ringIndex.load(std::memory_order_acquire); 
-                long long ringSize = 1048576; 
-                long long size = 8192; 
-                
-                if (latencyFloats < 0) latencyFloats = 0; 
+                long long writeHead = m_ringIndex.load(std::memory_order_acquire);
+                long long ringSize = 1048576;
+                long long size = 8192;
+
+                if (latencyFloats < 0) latencyFloats = 0;
                 if (latencyFloats > ringSize - size) latencyFloats = ringSize - size;
-                
-                long long readHead = ((writeHead - latencyFloats) % ringSize + ringSize) % ringSize; 
-                long long startIdx = ((readHead - size) % ringSize + ringSize) % ringSize; 
+
+                long long readHead = ((writeHead - latencyFloats) % ringSize + ringSize) % ringSize;
+                long long startIdx = ((readHead - size) % ringSize + ringSize) % ringSize;
                 int firstPart = static_cast<int>(ringSize - startIdx);
-                
-                if (firstPart >= size) { 
-                    std::memcpy(m_pcmBuffer.data(), m_pcmRing.data() + startIdx, size * sizeof(float)); 
-                } else { 
-                    std::memcpy(m_pcmBuffer.data(), m_pcmRing.data() + startIdx, firstPart * sizeof(float)); 
-                    std::memcpy(m_pcmBuffer.data() + firstPart, m_pcmRing.data(), (size - firstPart) * sizeof(float)); 
+
+                if (firstPart >= size) {
+                    std::memcpy(m_pcmBuffer.data(), m_pcmRing.data() + startIdx, size * sizeof(float));
+                } else {
+                    std::memcpy(m_pcmBuffer.data(), m_pcmRing.data() + startIdx, firstPart * sizeof(float));
+                    std::memcpy(m_pcmBuffer.data() + firstPart, m_pcmRing.data(), (size - firstPart) * sizeof(float));
                 }
-                
+
                 computeCustomFFT(m_pcmBuffer, m_fftBuffer); emit dspDataReady(m_pcmBuffer, m_fftBuffer);
             }
         }
@@ -774,29 +996,54 @@ void KaedeAudioWorker::analyzerLoop() {
 
 PipelineInfo KaedeAudioWorker::getPipelineInfoWorker() const {
     PipelineInfo info;
-    if (m_outputMode == OutputMode::SharedMixer) { info.apiMode = "WASAPI SHARED MIXER"; info.latency = QString("%1 ms").arg(static_cast<int>(m_latencyMs.load())); BASS_DEVICEINFO dInfo; BASS_GetDeviceInfo(BASS_GetDevice(), &dInfo); info.deviceName = QString::fromUtf8(dInfo.name); } 
-    else if (m_outputMode == OutputMode::WASAPI_Exclusive) { info.apiMode = "WASAPI EVENT-DRIVEN"; if (dyn_BASS_WASAPI_GetInfo && dyn_BASS_WASAPI_GetDevice && dyn_BASS_WASAPI_GetDeviceInfo) { info.latency = QString("%1 ms").arg(static_cast<int>(m_latencyMs.load())); BASS_WASAPI_DEVICEINFO dInfo; dyn_BASS_WASAPI_GetDeviceInfo(dyn_BASS_WASAPI_GetDevice(), &dInfo); info.deviceName = QString::fromUtf8(dInfo.name); if (m_stream) { BASS_WASAPI_INFO wInfo; dyn_BASS_WASAPI_GetInfo(&wInfo); info.hasSrc = (m_dacSampleRate.load() != wInfo.freq); } } else { info.latency = "N/A"; info.deviceName = "WASAPI DLL MISSING"; } } 
+    if (m_outputMode == OutputMode::SharedMixer) { info.apiMode = "WASAPI SHARED MIXER"; info.latency = QString("%1 ms").arg(static_cast<int>(m_latencyMs.load())); BASS_DEVICEINFO dInfo; BASS_GetDeviceInfo(BASS_GetDevice(), &dInfo); info.deviceName = QString::fromUtf8(dInfo.name); }
+    else if (m_outputMode == OutputMode::WASAPI_Exclusive) { info.apiMode = "WASAPI EXCLUSIVE EVENT-DRIVEN"; if (dyn_BASS_WASAPI_GetInfo && dyn_BASS_WASAPI_GetDevice && dyn_BASS_WASAPI_GetDeviceInfo) { info.latency = QString("%1 ms").arg(static_cast<int>(m_latencyMs.load())); BASS_WASAPI_DEVICEINFO dInfo; dyn_BASS_WASAPI_GetDeviceInfo(dyn_BASS_WASAPI_GetDevice(), &dInfo); info.deviceName = QString::fromUtf8(dInfo.name); if (m_stream) { BASS_WASAPI_INFO wInfo; dyn_BASS_WASAPI_GetInfo(&wInfo); info.hasSrc = (m_dacSampleRate.load() != wInfo.freq); } } else { info.latency = "N/A"; info.deviceName = "WASAPI DLL MISSING"; } }
     else if (m_outputMode == OutputMode::ASIO) { info.apiMode = "ASIO DIRECT BITSTREAM"; if (dyn_BASS_ASIO_GetInfo && dyn_BASS_ASIO_GetDevice && dyn_BASS_ASIO_GetDeviceInfo) { info.latency = QString("%1 ms").arg(static_cast<int>(m_latencyMs.load())); BASS_ASIO_DEVICEINFO dInfo; dyn_BASS_ASIO_GetDeviceInfo(dyn_BASS_ASIO_GetDevice(), &dInfo); info.deviceName = QString::fromUtf8(dInfo.name); if (m_stream && dyn_BASS_ASIO_GetRate) { info.hasSrc = (m_baseSampleRate.load() != dyn_BASS_ASIO_GetRate()); } } else { info.latency = "N/A"; info.deviceName = "ASIO DLL MISSING"; } }
-    
-    if (m_stream) { 
-        if (m_isDsdMode.load() && m_outputMode != OutputMode::SharedMixer) { info.formatSpec = QString("%1Hz | DSD over PCM [DoP] (HW BYPASS)").arg(m_baseSampleRate.load()); info.hasSrc = false; } 
-        else if (m_coreMode.load() == DspCoreMode::Alien_FIR_128 && m_outputMode != OutputMode::SharedMixer) { info.formatSpec = QString("%1Hz -> %2Hz | ALIEN-FIR %3 (SINC POLYPHASE)").arg(m_baseSampleRate.load()).arg(m_dacSampleRate.load()).arg(m_targetFirTaps.load()); }
-        else { info.formatSpec = QString("%1Hz | STD-64 DOUBLE PRECISION IIR").arg(m_baseSampleRate.load()); }
-        if (m_outputMode == OutputMode::SharedMixer) { BASS_INFO bInfo; BASS_GetInfo(&bInfo); info.hasSrc = (m_baseSampleRate.load() != bInfo.freq); } 
-    } else { info.formatSpec = "IDLE"; info.hasSrc = false; } 
+
+    if (m_stream) {
+        if (m_isDsdMode.load() && m_outputMode == OutputMode::ASIO) {
+            if (m_isAsioNativeDsd.load()) {
+                info.formatSpec = QString("%1Hz | NATIVE DSD RAW (HARDWARE DIRECT)").arg(m_baseSampleRate.load());
+            } else {
+                info.formatSpec = QString("%1Hz | DSD over PCM [DoP] (BIT-PERFECT)").arg(m_baseSampleRate.load());
+            }
+            info.hasSrc = false;
+        }
+        else if (m_isDsdMode.load() && m_outputMode == OutputMode::WASAPI_Exclusive) {
+            info.formatSpec = QString("%1Hz | WASAPI DoP (BIT-PERFECT)").arg(m_baseSampleRate.load());
+            info.hasSrc = false;
+        }
+        else if (m_isDsdMode.load() && m_outputMode == OutputMode::SharedMixer) {
+            info.formatSpec = QString("%1Hz | DSD to PCM CONVERSION").arg(m_baseSampleRate.load());
+            info.hasSrc = false;
+        }
+        else if (m_coreMode.load() == DspCoreMode::Alien_FIR_128 && m_outputMode != OutputMode::SharedMixer) {
+            info.formatSpec = QString("%1Hz -> %2Hz | ALIEN-FIR %3 (SINC POLYPHASE)").arg(m_baseSampleRate.load()).arg(m_dacSampleRate.load()).arg(m_targetFirTaps.load());
+        }
+        else {
+            info.formatSpec = QString("%1Hz | STD-64 DOUBLE PRECISION IIR").arg(m_baseSampleRate.load());
+        }
+
+        if (m_outputMode == OutputMode::SharedMixer) { BASS_INFO bInfo; BASS_GetInfo(&bInfo); info.hasSrc = (m_baseSampleRate.load() != bInfo.freq); }
+    } else {
+        info.formatSpec = "IDLE"; info.hasSrc = false;
+    }
     return info;
 }
 
 KaedeAudioEngine::KaedeAudioEngine(QObject* parent) : QObject(parent) {
     qRegisterMetaType<PipelineInfo>("PipelineInfo"); qRegisterMetaType<std::vector<float>>("std::vector<float>"); qRegisterMetaType<std::vector<DspBiquad>>("std::vector<DspBiquad>");
+
+    qRegisterMetaType<DsdOutputMode>("DsdOutputMode");
+
     m_audioThread = new QThread(this); m_worker = new KaedeAudioWorker(); m_worker->moveToThread(m_audioThread);
-    
+
     connect(m_worker, &KaedeAudioWorker::playbackStateChanged, this, [this](bool playing){ m_isPlaying.store(playing); emit playbackStateChanged(playing); });
-    connect(m_worker, &KaedeAudioWorker::positionChanged, this, &KaedeAudioEngine::positionChanged); 
-    connect(m_worker, &KaedeAudioWorker::trackFinished, this, &KaedeAudioEngine::trackFinished); 
+    connect(m_worker, &KaedeAudioWorker::positionChanged, this, &KaedeAudioEngine::positionChanged);
+    connect(m_worker, &KaedeAudioWorker::trackFinished, this, &KaedeAudioEngine::trackFinished);
     connect(m_worker, &KaedeAudioWorker::dspDataReady, this, &KaedeAudioEngine::dspDataReady);
-    connect(m_worker, &KaedeAudioWorker::bufferingStateChanged, this, &KaedeAudioEngine::bufferingStateChanged); 
-    
+    connect(m_worker, &KaedeAudioWorker::bufferingStateChanged, this, &KaedeAudioEngine::bufferingStateChanged);
+
     m_audioThread->start(QThread::TimeCriticalPriority);
 }
 KaedeAudioEngine::~KaedeAudioEngine() { destroy(); }
@@ -807,6 +1054,10 @@ void KaedeAudioEngine::setOutputDevice(OutputMode mode, int deviceId) { QMetaObj
 void KaedeAudioEngine::setDspCoreMode(DspCoreMode mode) { QMetaObject::invokeMethod(m_worker, "setDspCoreModeWorker", Qt::BlockingQueuedConnection, Q_ARG(DspCoreMode, mode)); }
 void KaedeAudioEngine::setAlienFirConfig(int taps, int targetRate) { QMetaObject::invokeMethod(m_worker, "setAlienFirConfigWorker", Qt::BlockingQueuedConnection, Q_ARG(int, taps), Q_ARG(int, targetRate)); }
 void KaedeAudioEngine::setNoiseShaping(bool enabled) { QMetaObject::invokeMethod(m_worker, "setNoiseShapingWorker", Qt::QueuedConnection, Q_ARG(bool, enabled)); }
+
+void KaedeAudioEngine::setDsdOutputMode(DsdOutputMode mode) {
+    QMetaObject::invokeMethod(m_worker, "setDsdOutputModeWorker", Qt::BlockingQueuedConnection, Q_ARG(DsdOutputMode, mode));
+}
 
 bool KaedeAudioEngine::load(const QString& filePath) { bool success = false; QMetaObject::invokeMethod(m_worker, "loadTrack", Qt::BlockingQueuedConnection, Q_RETURN_ARG(bool, success), Q_ARG(QString, filePath)); return success; }
 void KaedeAudioEngine::play() { QMetaObject::invokeMethod(m_worker, "playTrack", Qt::QueuedConnection); }

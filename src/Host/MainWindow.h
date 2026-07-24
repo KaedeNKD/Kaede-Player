@@ -12,26 +12,29 @@
 #include <QComboBox>
 #include <QTimer>
 #include <QWidget>
-#include <QMoveEvent> 
-#include <QFrame> 
+#include <QMoveEvent>
+#include <QFrame>
 #include <QListWidget>
 #include <QTextEdit>
-#include <QGraphicsOpacityEffect> // 👑 加回硬體透明度引擎
+#include <QGraphicsOpacityEffect>
+#include <QShortcut>
+#include <QKeySequence>
+#include <QLabel>
 
 // 引入解耦的組件
 #include "Views/KaedeLibraryPanel.h"
-#include "DropZoneDialog.h" 
+#include "DropZoneDialog.h"
 #include "PlaybackConsole.h"
-#include "PlayerExpandedPanel.h" 
-#include "ProgressBarIsland.h" 
-#include "DspVisualizerPanel.h" 
-#include "KaedeAudioEngine.h" 
-#include "MediaMetadataParser.h" 
+#include "PlayerExpandedPanel.h"
+#include "ProgressBarIsland.h"
+#include "DspVisualizerPanel.h"
+#include "KaedeAudioEngine.h"
+#include "MediaMetadataParser.h"
 #include "KaedeDatabase.h"
 #include "TrackAnalyzerPanel.h"
-#include "TrackPeqPanel.h" 
+#include "TrackPeqPanel.h"
 
-class GBBackgroundWidget; 
+class GBBackgroundWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -41,21 +44,22 @@ public:
     ~MainWindow() override = default;
 
     bool experimentalAdaptiveFontColor = true;
-    
+
     QColor m_currentTextColor;
     QColor m_targetTextColor;
     QColor m_currentBgColor;
     QColor m_targetBgColor;
-    
+
     QVariantAnimation* m_colorWaveAnim = nullptr;
     QTimer* m_themeDelayTimer = nullptr;
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
-    void moveEvent(QMoveEvent *event) override; 
+    void moveEvent(QMoveEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
-    void closeEvent(QCloseEvent *event) override; 
+    void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private slots:
     void toggleSettingsMatrix();
@@ -63,8 +67,8 @@ private slots:
     void selectLibraryFolder();
     void selectCustomBackground();
     void showImportDialog();
-    
-    void playTrackFromModel(QAbstractItemModel* model, int index); 
+
+    void playTrackFromModel(QAbstractItemModel* model, int index);
     void playNextTrack();
     void playPrevTrack();
 
@@ -75,74 +79,89 @@ private slots:
 
 private:
     void setupUi();
-    void applyStaticTheme(); 
-    void animateWave(double progress); 
+    void applyStaticTheme();
+    void animateWave(double progress);
     void updateDominantColor(const QString& path);
     void updateDynamicLayout();
 
+    void setAndSaveCustomBackground(const QString& path);
+
+    // 👑 新增：專責處理標題狀態更新的函式
+    void updateWindowTitleState(bool isPlaying);
+
     QWidget* m_centralWidget = nullptr;
-    GBBackgroundWidget* m_fluidBg = nullptr; 
+    GBBackgroundWidget* m_fluidBg = nullptr;
 
     QWidget* m_titleBar = nullptr;
+    QLabel* m_titleLabel = nullptr; // 👑 提權為類別成員
+
     QPushButton* m_btnSettings = nullptr;
     QPushButton* m_btnMin = nullptr;
     QPushButton* m_btnMax = nullptr;
     QPushButton* m_btnClose = nullptr;
-    
-    // 👑 找回 Library 硬體淡出動畫
+
     QWidget* m_libraryContainer = nullptr;
     QGraphicsOpacityEffect* m_libOpacity = nullptr;
     QPropertyAnimation* m_libFadeAnim = nullptr;
     KaedeLibraryPanel* m_libraryPanel = nullptr;
-    
+
     QWidget* m_settingsContainer = nullptr;
     QFrame* m_settingsPanel = nullptr;
-    QPropertyAnimation* m_settingsAnim = nullptr; 
-    
+    QPropertyAnimation* m_settingsAnim = nullptr;
+
     TrackAnalyzerPanel* m_analyzerPanel = nullptr;
     QPushButton* m_btnAnalyzerToggle = nullptr;
 
     TrackPeqPanel* m_peqPanel = nullptr;
     QPushButton* m_btnPeqToggle = nullptr;
-    
-    QPushButton* m_btnSetBg = nullptr;   
-    QPushButton* m_btnClearBg = nullptr; 
-    QCheckBox* m_chkAdaptiveColor = nullptr; 
-    
+
+    QPushButton* m_btnSetBg = nullptr;
+    QPushButton* m_btnClearBg = nullptr;
+    QCheckBox* m_chkAdaptiveColor = nullptr;
+
     QComboBox* m_cmbCoreMode = nullptr;
-    QComboBox* m_cmbFirTaps = nullptr;    
-    QComboBox* m_cmbTargetRate = nullptr; 
+    QComboBox* m_cmbFirTaps = nullptr;
+    QComboBox* m_cmbTargetRate = nullptr;
     QCheckBox* m_chkNoiseShaping = nullptr;
     QComboBox* m_cmbApi = nullptr;
     QComboBox* m_cmbDevice = nullptr;
-    QPushButton* m_btnLibConfig = nullptr; 
+    QComboBox* m_cmbDsdMode = nullptr;
+    QPushButton* m_btnLibConfig = nullptr;
 
     PlaybackConsole* m_playbackConsole = nullptr;
     PlayerExpandedPanel* m_expandedPanel = nullptr;
-    ProgressBarIsland* m_progressBar = nullptr; 
-    DspVisualizerPanel* m_dspPanel = nullptr; 
-    
+    ProgressBarIsland* m_progressBar = nullptr;
+    DspVisualizerPanel* m_dspPanel = nullptr;
+
     bool m_isExpandedPanelOpen = false;
     bool m_isDspMode = false;
-    
-    // 👑 狀態機與渲染鎖
+
     QVariantAnimation* m_dspTransitionAnim = nullptr;
     double m_dspProgress = 0.0;
-    bool m_isDspTransitioning = false; 
-    
+    bool m_isDspTransitioning = false;
+
     bool m_isLibMode = false;
-    QWidget* m_libPanel = nullptr; 
-    QPushButton* m_btnLibClose = nullptr; 
-    QPushButton* m_btnScan = nullptr; 
-    QListWidget* m_dirList = nullptr; 
-    QTextEdit* m_scanLog = nullptr;   
+    QWidget* m_libPanel = nullptr;
+    QPushButton* m_btnLibClose = nullptr;
+    QPushButton* m_btnScan = nullptr;
+    QListWidget* m_dirList = nullptr;
+    QTextEdit* m_scanLog = nullptr;
     QVariantAnimation* m_libTransitionAnim = nullptr;
     double m_libProgress = 0.0;
-    
+
     KaedeAudioEngine* m_audioEngine = nullptr;
     int m_currentTrackIndex = -1;
-    QAbstractItemModel* m_currentPlayModel = nullptr; 
+    QAbstractItemModel* m_currentPlayModel = nullptr;
+
+    // 👑 新增：紀錄當前播放歌曲的名稱
+    QString m_currentTrackTitle;
+
     bool m_isSettingsOpen = false;
+
+    QWidget* m_btnHoverSensor = nullptr;
+    QPropertyAnimation* m_btnSettingsAnim = nullptr;
+    QTimer* m_settingsBtnHideTimer = nullptr;
+    bool m_isSettingsBtnVisible = false;
 };
 
 #endif // MAINWINDOW_H

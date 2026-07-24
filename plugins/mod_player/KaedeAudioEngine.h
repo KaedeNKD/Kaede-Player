@@ -24,6 +24,10 @@
 enum class OutputMode { SharedMixer = 0, WASAPI_Exclusive = 1, ASIO = 2 };
 enum class DspCoreMode { Standard_64 = 0, Alien_FIR_128 = 1 };
 
+// 👑 新增：DSD 專屬輸出模式列舉
+enum class DsdOutputMode { DoP = 0, Native = 1 };
+Q_DECLARE_METATYPE(DsdOutputMode)
+
 struct AudioDeviceInfo { int id; QString name; OutputMode mode; };
 Q_DECLARE_METATYPE(AudioDeviceInfo)
 
@@ -115,6 +119,10 @@ public slots:
     void setOutputDeviceWorker(OutputMode mode, int deviceId);
     void setDspCoreModeWorker(DspCoreMode mode); 
     void setAlienFirConfigWorker(int taps, int targetRate); 
+    
+    // 👑 新增：套用 DSD 輸出模式
+    void setDsdOutputModeWorker(DsdOutputMode mode);
+    
     bool loadTrack(const QString& filePath);
     void playTrack(); void pauseTrack(); void stopTrack();
     void seekTrack(double targetSeconds); void setVolume(double vol); void setLooping(bool loop);
@@ -149,7 +157,9 @@ private:
     std::atomic<int> m_targetFirTaps{128};
     std::atomic<int> m_userTargetRate{-1};
 
-    // 👑 擴充至 9階 動態適應暫存器 (Standard_64 專用)
+    // 👑 紀錄當前 DSD 輸出選項
+    std::atomic<DsdOutputMode> m_dsdOutputMode{DsdOutputMode::DoP};
+
     std::atomic<bool> m_noiseShapingEnabled{true};
     double m_stdNsErrorL[9] = {0};
     double m_stdNsErrorR[9] = {0};
@@ -210,6 +220,9 @@ public:
     void setAlienFirConfig(int taps, int targetRate); 
     void setNoiseShaping(bool enabled); 
     
+    // 👑 對外公開：設定 DSD 輸出模式
+    void setDsdOutputMode(DsdOutputMode mode);
+
     bool load(const QString& filePath); void play(); void pause(); void stop();
     void seek(double targetSeconds); void setVolume(double volume); void setLooping(bool loop);
     void updatePeqConfig(bool masterEnabled, const std::vector<DspBiquad>& filters, bool bypassed, double preampLinear, double wetRatio);

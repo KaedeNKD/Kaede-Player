@@ -14,8 +14,19 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QScrollBar>
-#include <cmath> // 👑 補上數學函式庫
+#include <QShortcut>
+#include <QKeySequence>
+#include <QScrollArea> // 👑 確保引入滾動卷軸模組
+
+#include <QStandardPaths>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+
 #include <utility>
+
+// 👑 為什麼要演奏春日影！？ (彩蛋狀態追蹤)
+static bool g_isHaruhikageActive = false;
 
 #ifdef _WIN32
 #include <windows.h>
@@ -26,7 +37,6 @@
 #endif
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
-    // 👑 堅持使用最穩定的 D3D11，防止切換高頻 Resize 時的渲染管線崩潰
     qputenv("QSG_RHI_BACKEND", "d3d11");
     
     setWindowFlags(Qt::Window | Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint); 
@@ -45,7 +55,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(m_themeDelayTimer, &QTimer::timeout, this, [this]() { if (m_currentTextColor != m_targetTextColor || m_currentBgColor != m_targetBgColor) m_colorWaveAnim->start(); });
 
     setupUi(); 
-    AdaptiveColorEngine::instance().extractColorFromImage(":/img/BG.png");
+
+    QString savedBgPath = KaedeDatabase::instance().getConfig("custom_bg_path", "").toString();
+    QString initialBg = (!savedBgPath.isEmpty() && QFile::exists(savedBgPath)) ? savedBgPath : ":/img/BG.png";
+    
+    if (m_fluidBg) m_fluidBg->setBackgroundImage(initialBg);
+    AdaptiveColorEngine::instance().extractColorFromImage(initialBg);
+    
     m_currentTextColor = AdaptiveColorEngine::instance().getTextColor(experimentalAdaptiveFontColor); m_targetTextColor = m_currentTextColor;
     m_currentBgColor = AdaptiveColorEngine::instance().getPanelBackgroundColor(experimentalAdaptiveFontColor); m_targetBgColor = m_currentBgColor;
     animateWave(1.0); 
@@ -53,18 +69,41 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
 void MainWindow::playTrackFromModel(QAbstractItemModel* model, int index) {
     if (index < 0 || index >= model->rowCount() || !m_audioEngine) return;
-    
-    m_currentPlayModel = model; 
-    m_currentTrackIndex = index; 
+
+    m_currentPlayModel = model;
+    m_currentTrackIndex = index;
     QModelIndex idx = model->index(index, 0);
-    
-    QString path = model->data(idx, KaedeTrackModel::PathRole).toString(); 
+
+    QString path = model->data(idx, KaedeTrackModel::PathRole).toString();
     QString title = model->data(idx, KaedeTrackModel::TitleRole).toString();
-    QString artist = model->data(idx, KaedeTrackModel::ArtistRole).toString(); 
+    QString artist = model->data(idx, KaedeTrackModel::ArtistRole).toString();
     QString coverUrl = model->data(idx, KaedeTrackModel::CoverUrlRole).toString();
-    
-    QImage coverImg; if (coverUrl.startsWith("file:///")) coverImg.load(coverUrl.mid(8)); 
+
+    m_currentTrackTitle = title.trimmed().isEmpty() ? QFileInfo(path).baseName() : title;
+
+    // ========================================================
+    // 👑 MyGO 春日影防線：偵測到關鍵字，強制讓祥子破防！
+    // ========================================================
+    QString searchStr = (m_currentTrackTitle + QFileInfo(path).baseName()).toLower();
+    bool triggerEgg = searchStr.contains("春日影") || searchStr.contains("haruhikage") || searchStr.contains("はるひかげ");
+
+    if (triggerEgg && !g_isHaruhikageActive) {
+        g_isHaruhikageActive = true;
+        if (m_fluidBg) m_fluidBg->setBackgroundImage(":/img/haruhikage.png");
+        updateDominantColor(":/img/haruhikage.png");
+    } else if (!triggerEgg && g_isHaruhikageActive) {
+        // 切換到其他正常歌曲時，自動恢復成設定中儲存的桌布
+        g_isHaruhikageActive = false;
+        QString savedBgPath = KaedeDatabase::instance().getConfig("custom_bg_path", "").toString();
+        QString normalBg = (!savedBgPath.isEmpty() && QFile::exists(savedBgPath)) ? savedBgPath : ":/img/BG.png";
+        if (m_fluidBg) m_fluidBg->setBackgroundImage(normalBg);
+        updateDominantColor(normalBg);
+    }
+    // ========================================================
+
+    QImage coverImg; if (coverUrl.startsWith("file:///")) coverImg.load(coverUrl.mid(8));
     TrackInfo info = MediaMetadataParser::instance().parse(path);
+    // ... 下面保持原樣 ...
     if (info.coverImg.isNull() && !coverImg.isNull()) info.coverImg = coverImg; 
     else if (!info.coverImg.isNull()) coverImg = info.coverImg;
     
@@ -86,6 +125,21 @@ void MainWindow::playPrevTrack() {
     int count = m_currentPlayModel->rowCount(); if (count == 0) return; 
     int prevIndex = m_currentTrackIndex - 1; if (prevIndex < 0) prevIndex = count - 1; 
     playTrackFromModel(m_currentPlayModel, prevIndex); 
+}
+
+void MainWindow::updateWindowTitleState(bool isPlaying) {
+    if (!m_titleLabel) return;
+    
+    QString fullTitle;
+    if (m_currentTrackIndex == -1) {
+        fullTitle = QString::fromUtf8("待命 - Kaede Player");
+    } else {
+        QString stateStr = isPlaying ? QString::fromUtf8("播放中") : QString::fromUtf8("暫停中");
+        fullTitle = QString("%1 %2 - Kaede Player").arg(stateStr, m_currentTrackTitle);
+    }
+    
+    m_titleLabel->setText(fullTitle);
+    this->setWindowTitle(fullTitle);
 }
 
 void MainWindow::setupUi() {
@@ -117,12 +171,41 @@ void MainWindow::setupUi() {
     QVBoxLayout *mainLayout = new QVBoxLayout(m_centralWidget); mainLayout->setContentsMargins(0, 0, 0, 0); mainLayout->setSpacing(0);
     m_titleBar = new QWidget(m_centralWidget); m_titleBar->setFixedHeight(38); m_titleBar->setObjectName("AppTitleBar");
     QHBoxLayout *titleLayout = new QHBoxLayout(m_titleBar); titleLayout->setContentsMargins(15, 0, 0, 0);
-    QLabel *titleLabel = new QLabel("Kaede Player", m_titleBar); titleLabel->setObjectName("TitleLabel"); titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
-    titleLayout->addWidget(titleLabel); titleLayout->addStretch();
+    
+    m_titleLabel = new QLabel(QString::fromUtf8("待命 - Kaede Player"), m_titleBar); 
+    m_titleLabel->setObjectName("TitleLabel"); 
+    m_titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    titleLayout->addWidget(m_titleLabel); 
+    titleLayout->addStretch();
     
     m_btnSettings = new QPushButton(QString::fromUtf8("設定"), m_centralWidget); m_btnSettings->setFixedSize(80, 36); 
     connect(m_btnSettings, &QPushButton::clicked, this, &MainWindow::toggleSettingsMatrix); 
     
+    QShortcut *shortcutSettings = new QShortcut(QKeySequence("Ctrl+O"), this);
+    connect(shortcutSettings, &QShortcut::activated, this, &MainWindow::toggleSettingsMatrix);
+
+    m_btnHoverSensor = new QWidget(m_centralWidget);
+    m_btnHoverSensor->setStyleSheet("background: transparent;"); 
+    m_btnHoverSensor->installEventFilter(this); 
+    m_btnSettings->installEventFilter(this);    
+
+    m_btnSettingsAnim = new QPropertyAnimation(m_btnSettings, "pos", this);
+    m_btnSettingsAnim->setDuration(350); 
+
+    m_settingsBtnHideTimer = new QTimer(this);
+    m_settingsBtnHideTimer->setInterval(300);
+    m_settingsBtnHideTimer->setSingleShot(true);
+    connect(m_settingsBtnHideTimer, &QTimer::timeout, this, [this]() {
+        m_isSettingsBtnVisible = false;
+        m_btnSettingsAnim->stop();
+        m_btnSettingsAnim->setStartValue(m_btnSettings->pos());
+        m_btnSettingsAnim->setEndValue(QPoint(20, this->height() + 20)); 
+        m_btnSettingsAnim->setEasingCurve(QEasingCurve::InCubic); 
+        m_btnSettingsAnim->start();
+    });
+    
+    m_btnSettings->move(20, this->height() + 20); 
+
     m_btnMin = new QPushButton("—", m_titleBar); m_btnMin->setFixedSize(45, 38); connect(m_btnMin, &QPushButton::clicked, this, &MainWindow::showMinimized); titleLayout->addWidget(m_btnMin);
     m_btnMax = new QPushButton(QString::fromUtf8("\xE2\x96\xA1"), m_titleBar); m_btnMax->setFixedSize(45, 38); connect(m_btnMax, &QPushButton::clicked, this, &MainWindow::toggleMaximize); titleLayout->addWidget(m_btnMax);
     m_btnClose = new QPushButton("✕", m_titleBar); m_btnClose->setFixedSize(45, 38); connect(m_btnClose, &QPushButton::clicked, this, &MainWindow::close); titleLayout->addWidget(m_btnClose);
@@ -170,39 +253,86 @@ void MainWindow::setupUi() {
     };
     injectMinimizeBtn(m_analyzerPanel, m_btnAnalyzerToggle); injectMinimizeBtn(m_peqPanel, m_btnPeqToggle);
 
-    m_settingsContainer = new QWidget(this); m_settingsContainer->setWindowFlags(Qt::Tool | Qt::FramelessWindowHint); m_settingsContainer->setAttribute(Qt::WA_TranslucentBackground); m_settingsContainer->hide();
-    m_settingsPanel = new QFrame(m_settingsContainer); m_settingsPanel->setObjectName("SettingsPanel"); m_settingsPanel->setFixedWidth(380);
-    m_settingsAnim = new QPropertyAnimation(m_settingsPanel, "pos", this); m_settingsAnim->setDuration(300); m_settingsAnim->setEasingCurve(QEasingCurve::OutCubic);
+    // =========================================================
+    // 👑 設定面板容器與滾動卷軸 (QScrollArea) 結構重建
+    // =========================================================
+    m_settingsContainer = new QWidget(this); 
+    m_settingsContainer->setWindowFlags(Qt::Tool | Qt::FramelessWindowHint); 
+    m_settingsContainer->setAttribute(Qt::WA_TranslucentBackground); 
+    m_settingsContainer->hide();
+    
+    m_settingsPanel = new QFrame(m_settingsContainer); 
+    m_settingsPanel->setObjectName("SettingsPanel"); 
+    m_settingsPanel->setFixedWidth(380);
+    
+    m_settingsAnim = new QPropertyAnimation(m_settingsPanel, "pos", this); 
+    m_settingsAnim->setDuration(300); 
+    m_settingsAnim->setEasingCurve(QEasingCurve::OutCubic);
     connect(m_settingsAnim, &QPropertyAnimation::finished, this, [this]() { if (!m_isSettingsOpen) m_settingsContainer->hide(); });
 
-    QVBoxLayout* setPageLayout = new QVBoxLayout(m_settingsPanel); setPageLayout->setContentsMargins(25, 25, 25, 30); setPageLayout->setSpacing(15);
-    QLabel* lblCfg = new QLabel("CONFIG MATRIX", m_settingsPanel); lblCfg->setStyleSheet("color: #FFFFFF; font-family: 'Segoe UI'; font-size: 20px; font-weight: bold; background: transparent; letter-spacing: 1px;"); setPageLayout->addWidget(lblCfg);
+    QVBoxLayout* panelBaseLayout = new QVBoxLayout(m_settingsPanel);
+    panelBaseLayout->setContentsMargins(0, 0, 0, 0);
 
-    auto makeGroupCard = [this, setPageLayout](const QString& title) -> QVBoxLayout* {
-        QWidget* card = new QWidget(m_settingsPanel); card->setStyleSheet("QWidget { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 8px; }");
-        QVBoxLayout* l = new QVBoxLayout(card); l->setContentsMargins(15, 15, 15, 15); l->setSpacing(12);
-        QLabel* t = new QLabel(title, card); t->setStyleSheet("color: #A0A0A0; font-family: 'Consolas'; font-size: 11px; font-weight: bold; border: none; background: transparent;"); l->addWidget(t);
-        QFrame* line = new QFrame(card); line->setFrameShape(QFrame::HLine); line->setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none; max-height: 1px;"); l->addWidget(line);
-        setPageLayout->addWidget(card); return l;
+    QScrollArea* scrollArea = new QScrollArea(m_settingsPanel);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setStyleSheet(
+        "QScrollArea { background: transparent; border: none; }"
+        "QScrollBar:vertical { background: transparent; width: 6px; margin: 0px; }"
+        "QScrollBar::handle:vertical { background: rgba(255,255,255,0.2); border-radius: 3px; }"
+        "QScrollBar::handle:vertical:hover { background: rgba(255,255,255,0.4); }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }"
+    );
+    panelBaseLayout->addWidget(scrollArea);
+
+    QWidget* scrollContent = new QWidget(scrollArea);
+    scrollContent->setObjectName("SettingsScrollContent");
+    scrollContent->setStyleSheet("#SettingsScrollContent { background: transparent; }");
+    scrollArea->setWidget(scrollContent);
+
+    QVBoxLayout* setPageLayout = new QVBoxLayout(scrollContent); 
+    setPageLayout->setContentsMargins(25, 25, 25, 30); 
+    setPageLayout->setSpacing(15);
+    
+    QLabel* lblCfg = new QLabel("CONFIG MATRIX", scrollContent); 
+    lblCfg->setStyleSheet("color: #FFFFFF; font-family: 'Segoe UI'; font-size: 20px; font-weight: bold; background: transparent; letter-spacing: 1px;"); 
+    setPageLayout->addWidget(lblCfg);
+
+    auto makeGroupCard = [scrollContent, setPageLayout](const QString& title) -> QVBoxLayout* {
+        QWidget* card = new QWidget(scrollContent); 
+        card->setStyleSheet("QWidget { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 8px; }");
+        QVBoxLayout* l = new QVBoxLayout(card); 
+        l->setContentsMargins(15, 15, 15, 15); 
+        l->setSpacing(12);
+        QLabel* t = new QLabel(title, card); 
+        t->setStyleSheet("color: #A0A0A0; font-family: 'Consolas'; font-size: 11px; font-weight: bold; border: none; background: transparent;"); 
+        l->addWidget(t);
+        QFrame* line = new QFrame(card); 
+        line->setFrameShape(QFrame::HLine); 
+        line->setStyleSheet("background: rgba(255, 255, 255, 0.08); border: none; max-height: 1px;"); 
+        l->addWidget(line);
+        setPageLayout->addWidget(card); 
+        return l;
     };
 
     QString comboQSS = "QComboBox { background: rgba(0,0,0,0.5); color: #FFFFFF; font-family: 'Segoe UI'; font-size: 12px; font-weight: bold; border: 1px solid #444; border-radius: 4px; padding: 6px 12px; } QComboBox::drop-down { border: none; width: 30px; } QComboBox QAbstractItemView { background: #1A1A1A; color: #FFFFFF; border: 1px solid #444; selection-background-color: #38B2CE; }";
 
     QVBoxLayout* dspLayout = makeGroupCard("DSP CORE & UPSAMPLING");
-    m_cmbCoreMode = new QComboBox(m_settingsPanel); m_cmbCoreMode->setStyleSheet(comboQSS);
+    m_cmbCoreMode = new QComboBox(scrollContent); m_cmbCoreMode->setStyleSheet(comboQSS);
     m_cmbCoreMode->addItem("64-bit IIR", static_cast<int>(DspCoreMode::Standard_64));
     m_cmbCoreMode->addItem("FIR (Polyphase Sinc)", static_cast<int>(DspCoreMode::Alien_FIR_128));
     dspLayout->addWidget(m_cmbCoreMode);
 
-    m_cmbFirTaps = new QComboBox(m_settingsPanel); m_cmbFirTaps->setStyleSheet(comboQSS);
+    m_cmbFirTaps = new QComboBox(scrollContent); m_cmbFirTaps->setStyleSheet(comboQSS);
     m_cmbFirTaps->addItem("64 Taps", 64); m_cmbFirTaps->addItem("128 Taps", 128); m_cmbFirTaps->addItem("256 Taps", 256); m_cmbFirTaps->addItem("512 Taps", 512);
     dspLayout->addWidget(m_cmbFirTaps);
 
-    m_cmbTargetRate = new QComboBox(m_settingsPanel); m_cmbTargetRate->setStyleSheet(comboQSS);
+    m_cmbTargetRate = new QComboBox(scrollContent); m_cmbTargetRate->setStyleSheet(comboQSS);
     m_cmbTargetRate->addItem("Native (1x PCM)", 0); m_cmbTargetRate->addItem("192 kHz (4x PCM)", 192000); m_cmbTargetRate->addItem("384 kHz (8x PCM)", 384000); m_cmbTargetRate->addItem("768 kHz (16x PCM)", 768000); m_cmbTargetRate->addItem("Auto (Hardware Limit)", -1);
     dspLayout->addWidget(m_cmbTargetRate);
 
-    m_chkNoiseShaping = new QCheckBox(" 2nd-Order Noise Shaping (TPDF)", m_settingsPanel);
+    m_chkNoiseShaping = new QCheckBox(" 2nd-Order Noise Shaping (TPDF)", scrollContent);
     m_chkNoiseShaping->setStyleSheet("QCheckBox { color: #EAEAEA; font-family: 'Segoe UI'; font-size: 13px; font-weight: bold; background: transparent; border: none; spacing: 10px; margin-top: 4px; } QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 2px solid #666; background: rgba(0, 0, 0, 0.4); } QCheckBox::indicator:checked { background: #EAEAEA; border: 2px solid #EAEAEA; }");
     dspLayout->addWidget(m_chkNoiseShaping);
 
@@ -230,23 +360,72 @@ void MainWindow::setupUi() {
     connect(m_chkNoiseShaping, &QCheckBox::toggled, this, [this](bool checked) { KaedeDatabase::instance().setConfig("audio_noise_shaping", checked); if (m_audioEngine) m_audioEngine->setNoiseShaping(checked); });
 
     QVBoxLayout* audioLayout = makeGroupCard("ASIO/WASAPI HARDWARE ROUTING");
-    m_cmbApi = new QComboBox(m_settingsPanel); m_cmbApi->setStyleSheet(comboQSS);
-    m_cmbApi->addItem("WASAPI Shared (Mixer)", QVariant::fromValue(OutputMode::SharedMixer)); m_cmbApi->addItem("WASAPI Exclusive", QVariant::fromValue(OutputMode::WASAPI_Exclusive)); m_cmbApi->addItem("ASIO (Bit-Perfect)", QVariant::fromValue(OutputMode::ASIO));
-    audioLayout->addWidget(m_cmbApi); m_cmbDevice = new QComboBox(m_settingsPanel); m_cmbDevice->setStyleSheet(comboQSS); audioLayout->addWidget(m_cmbDevice);
-    connect(m_cmbApi, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::populateDeviceList);
+    m_cmbApi = new QComboBox(scrollContent); m_cmbApi->setStyleSheet(comboQSS);
+    m_cmbApi->addItem("WASAPI Shared (Mixer)", QVariant::fromValue(OutputMode::SharedMixer)); 
+    m_cmbApi->addItem("WASAPI Exclusive", QVariant::fromValue(OutputMode::WASAPI_Exclusive)); 
+    m_cmbApi->addItem("ASIO (Bit-Perfect)", QVariant::fromValue(OutputMode::ASIO));
+    audioLayout->addWidget(m_cmbApi); 
+    
+    m_cmbDevice = new QComboBox(scrollContent); m_cmbDevice->setStyleSheet(comboQSS); 
+    audioLayout->addWidget(m_cmbDevice);
+
+    // 👑 DSD 輸出模式設定 (預設為 DoP)
+    m_cmbDsdMode = new QComboBox(scrollContent); m_cmbDsdMode->setStyleSheet(comboQSS);
+    m_cmbDsdMode->addItem("DSD over PCM (DoP)", static_cast<int>(DsdOutputMode::DoP));
+    m_cmbDsdMode->addItem("Native DSD (ASIO Direct)", static_cast<int>(DsdOutputMode::Native));
+    audioLayout->addWidget(m_cmbDsdMode);
+
+    int savedDsdMode = KaedeDatabase::instance().getConfig("audio_dsd_mode", static_cast<int>(DsdOutputMode::DoP)).toInt();
+    m_cmbDsdMode->setCurrentIndex(m_cmbDsdMode->findData(savedDsdMode) != -1 ? m_cmbDsdMode->findData(savedDsdMode) : 0);
+    m_audioEngine->setDsdOutputMode(static_cast<DsdOutputMode>(savedDsdMode));
+    
+    auto updateAudioUi = [this, comboQSS]() {
+        // 👑 修正的變數轉型：正確提取自訂 Enum
+        bool isAsio = (m_cmbApi->currentData().value<OutputMode>() == OutputMode::ASIO);
+        m_cmbDsdMode->setEnabled(isAsio);
+        QString disabledQSS = comboQSS + " QComboBox { color: #555; border: 1px solid #333; background: rgba(0,0,0,0.2); }";
+        m_cmbDsdMode->setStyleSheet(isAsio ? comboQSS : disabledQSS);
+    };
+    updateAudioUi();
+
+    connect(m_cmbDsdMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) { 
+        DsdOutputMode mode = static_cast<DsdOutputMode>(m_cmbDsdMode->itemData(index).toInt()); 
+        KaedeDatabase::instance().setConfig("audio_dsd_mode", static_cast<int>(mode)); 
+        m_audioEngine->setDsdOutputMode(mode); 
+    });
+
+    connect(m_cmbApi, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, updateAudioUi](){ 
+        updateAudioUi(); 
+        populateDeviceList(); 
+    });
     connect(m_cmbDevice, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onApiOrDeviceChanged);
 
     QVBoxLayout* appLayout = makeGroupCard("UI APPEARANCE & THEME");
-    m_chkAdaptiveColor = new QCheckBox(" Adaptive Font Color", m_settingsPanel); m_chkAdaptiveColor->setChecked(experimentalAdaptiveFontColor);
+    m_chkAdaptiveColor = new QCheckBox(" Adaptive Font Color", scrollContent); m_chkAdaptiveColor->setChecked(experimentalAdaptiveFontColor);
     m_chkAdaptiveColor->setStyleSheet("QCheckBox { color: #EAEAEA; font-family: 'Segoe UI'; font-size: 13px; font-weight: bold; background: transparent; border: none; spacing: 10px; } QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px; border: 2px solid #666; background: rgba(0, 0, 0, 0.4); } QCheckBox::indicator:checked { background: #EAEAEA; border: 2px solid #EAEAEA; }");
     connect(m_chkAdaptiveColor, &QCheckBox::toggled, this, [this](bool checked) { experimentalAdaptiveFontColor = checked; AdaptiveColorEngine::instance().setAdaptiveEnabled(checked); QColor newTargetTxt = AdaptiveColorEngine::instance().getTextColor(experimentalAdaptiveFontColor); QColor newTargetBg = AdaptiveColorEngine::instance().getPanelBackgroundColor(experimentalAdaptiveFontColor); if (newTargetTxt != m_targetTextColor || newTargetBg != m_targetBgColor) { m_targetTextColor = newTargetTxt; m_targetBgColor = newTargetBg; if (m_colorWaveAnim->state() == QAbstractAnimation::Running) m_colorWaveAnim->stop(); m_colorWaveAnim->start(); } });
     appLayout->addWidget(m_chkAdaptiveColor);
-    QHBoxLayout* bgLayoutBtn = new QHBoxLayout(); m_btnSetBg = new QPushButton("CUSTOM BG", m_settingsPanel); m_btnSetBg->setFixedHeight(36); m_btnClearBg = new QPushButton("RESET", m_settingsPanel); m_btnClearBg->setFixedSize(80, 36);
-    connect(m_btnSetBg, &QPushButton::clicked, this, &MainWindow::selectCustomBackground); connect(m_btnClearBg, &QPushButton::clicked, this, [this](){ if(m_fluidBg) m_fluidBg->clearBackground(); updateDominantColor(":/img/BG.png"); });
+    QHBoxLayout* bgLayoutBtn = new QHBoxLayout(); 
+    m_btnSetBg = new QPushButton("CUSTOM BG", scrollContent); m_btnSetBg->setFixedHeight(36); 
+    m_btnClearBg = new QPushButton("RESET", scrollContent); m_btnClearBg->setFixedSize(80, 36);
+    
+    connect(m_btnSetBg, &QPushButton::clicked, this, &MainWindow::selectCustomBackground); 
+    
+    connect(m_btnClearBg, &QPushButton::clicked, this, [this](){ 
+        QString savedBgPath = KaedeDatabase::instance().getConfig("custom_bg_path", "").toString();
+        if (!savedBgPath.isEmpty() && QFile::exists(savedBgPath)) {
+            QFile::remove(savedBgPath); 
+        }
+        KaedeDatabase::instance().setConfig("custom_bg_path", "");
+        g_isHaruhikageActive = false; // 👑 解除彩蛋鎖定
+        
+        if(m_fluidBg) m_fluidBg->setBackgroundImage(":/img/BG.png"); 
+        updateDominantColor(":/img/BG.png"); 
+    });
     bgLayoutBtn->addWidget(m_btnSetBg); bgLayoutBtn->addWidget(m_btnClearBg); appLayout->addLayout(bgLayoutBtn);
-    // 👑 補回遺失的媒體庫設定區塊
+
     QVBoxLayout* dbLayout = makeGroupCard("DATABASE & LIBRARY");
-    m_btnLibConfig = new QPushButton("MEDIA LIBRARY CONFIG", m_settingsPanel); m_btnLibConfig->setFixedHeight(44);
+    m_btnLibConfig = new QPushButton("MEDIA LIBRARY CONFIG", scrollContent); m_btnLibConfig->setFixedHeight(44);
     m_btnLibConfig->setStyleSheet("QPushButton { background: rgba(56, 178, 206, 0.15); color: #38B2CE; border: 1px solid rgba(56, 178, 206, 0.4); border-radius: 6px; font-family: 'Consolas'; font-size: 13px; font-weight: bold; letter-spacing: 1px; } QPushButton:hover { background: rgba(56, 178, 206, 0.3); color: #FFFFFF; border: 1px solid #38B2CE; } QPushButton:pressed { background: rgba(56, 178, 206, 0.5); }");
     dbLayout->addWidget(m_btnLibConfig);
     connect(m_btnLibConfig, &QPushButton::clicked, this, &MainWindow::toggleLibMode);
@@ -254,9 +433,6 @@ void MainWindow::setupUi() {
     setPageLayout->addStretch();
     setCentralWidget(m_centralWidget);
 
-    setPageLayout->addStretch(); 
-    setCentralWidget(m_centralWidget); 
-    
     m_libPanel = new QWidget(m_centralWidget); m_libPanel->setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(255, 255, 255, 0.95), stop:1 rgba(240, 245, 250, 0.88)); border: 1px solid rgba(255, 255, 255, 0.9); border-radius: 16px;"); m_libPanel->hide();
 
     QVBoxLayout* libLayout = new QVBoxLayout(m_libPanel); libLayout->setContentsMargins(40, 40, 40, 40); libLayout->setSpacing(20);
@@ -297,26 +473,23 @@ void MainWindow::setupUi() {
 
     m_expandedPanel = new PlayerExpandedPanel(m_centralWidget);
     if (m_fluidBg) m_fluidBg->lower(); if (m_libraryContainer) m_libraryContainer->raise(); if (m_titleBar) m_titleBar->raise(); if (m_playbackConsole) m_playbackConsole->raise(); if (m_progressBar) m_progressBar->raise(); if (m_dspPanel) m_dspPanel->raise(); if (m_libPanel) m_libPanel->raise(); if (m_expandedPanel) m_expandedPanel->raise(); if (m_btnAnalyzerToggle) m_btnAnalyzerToggle->raise(); if (m_btnPeqToggle) m_btnPeqToggle->raise(); if (m_settingsContainer) m_settingsContainer->raise();
+    if (m_btnHoverSensor) m_btnHoverSensor->raise(); if (m_btnSettings) m_btnSettings->raise();
 
     m_dspTransitionAnim = new QVariantAnimation(this); 
     m_dspTransitionAnim->setDuration(800); 
     connect(m_dspTransitionAnim, &QVariantAnimation::valueChanged, this, [this](const QVariant& val) { m_dspProgress = val.toDouble(); updateDynamicLayout(); });
     
-    // 👑 嚴格生命週期管理：動畫開始時切斷音訊渲染，結束時恢復並清理殘留
     connect(m_dspTransitionAnim, &QAbstractAnimation::stateChanged, this, [this](QAbstractAnimation::State newState, QAbstractAnimation::State oldState) { 
         Q_UNUSED(oldState); 
         if (newState == QAbstractAnimation::Running) { 
-            m_isDspTransitioning = true; // 上鎖：拒絕高頻重繪
+            m_isDspTransitioning = true; 
         } else if (newState == QAbstractAnimation::Stopped) { 
-            m_isDspTransitioning = false; // 解鎖
-            
-            // 如果是徹底收起狀態，做最終的資源回收
+            m_isDspTransitioning = false; 
             if (!m_isDspMode) {
                 if (m_dspPanel) m_dspPanel->hide();
                 if (m_progressBar) m_progressBar->setDspMode(false);
                 if (m_fluidBg) m_fluidBg->setSelectingState(false);
             } else {
-                // 如果是徹底展開狀態，隱藏底層清單省資源
                 if (m_libraryContainer) m_libraryContainer->hide();
             }
         } 
@@ -324,19 +497,53 @@ void MainWindow::setupUi() {
 
     m_audioEngine->setDspCoreMode(static_cast<DspCoreMode>(savedCoreMode)); m_audioEngine->setAlienFirConfig(savedTaps, savedRate); m_audioEngine->setNoiseShaping(savedNS);
     int savedApiMode = KaedeDatabase::instance().getConfig("audio_api_mode", static_cast<int>(OutputMode::SharedMixer)).toInt();
-    m_cmbApi->blockSignals(true); int apiIndex = m_cmbApi->findData(savedApiMode); if (apiIndex != -1) m_cmbApi->setCurrentIndex(apiIndex); m_cmbApi->blockSignals(false);
+
+    m_cmbApi->blockSignals(true);
+
+    // 👑 將原本的 int apiIndex = m_cmbApi->findData(savedApiMode); 改成下面這行強型別查找：
+    int apiIndex = m_cmbApi->findData(QVariant::fromValue(static_cast<OutputMode>(savedApiMode)));
+
+    if (apiIndex != -1) m_cmbApi->setCurrentIndex(apiIndex);
+    m_cmbApi->blockSignals(false);
+
+    // 👑 補上這行：強制刷新一次 UI 邏輯，讓 NDSD 選單立刻解除封印！
+    updateAudioUi();
+
     populateDeviceList();
 
-    connect(m_audioEngine, &KaedeAudioEngine::playbackStateChanged, this, [this](bool playing) { if (m_playbackConsole) m_playbackConsole->setPlayState(playing); if (m_progressBar) m_progressBar->setPlaybackState(playing); });
+    connect(m_audioEngine, &KaedeAudioEngine::playbackStateChanged, this, [this](bool playing) { 
+        if (m_playbackConsole) m_playbackConsole->setPlayState(playing); 
+        if (m_progressBar) m_progressBar->setPlaybackState(playing); 
+        updateWindowTitleState(playing); 
+    });
+    
     connect(m_audioEngine, &KaedeAudioEngine::trackFinished, this, &MainWindow::playNextTrack);
     connect(m_audioEngine, &KaedeAudioEngine::positionChanged, this, [this](double currSec, double totalSec) { static qint64 lastUpdate = 0; qint64 now = QDateTime::currentMSecsSinceEpoch(); if (now - lastUpdate >= 50) { if (m_progressBar) m_progressBar->setProgress(currSec, totalSec); if (m_expandedPanel) m_expandedPanel->updateLyricPosition(currSec); lastUpdate = now; } });
     connect(m_progressBar, &ProgressBarIsland::sigSeekRequested, this, [this](double percent) { if (m_audioEngine) m_audioEngine->seek(percent * m_audioEngine->getDuration()); });
     connect(m_playbackConsole, &PlaybackConsole::sigPlayClicked, this, [this]() { if (!m_audioEngine) return; if (m_audioEngine->isPlaying()) { m_audioEngine->pause(); } else { if (m_currentTrackIndex == -1 && KaedeDatabase::instance().getTrackModel()->rowCount() > 0) playTrackFromModel(m_currentPlayModel, 0); else m_audioEngine->play(); } });
-    connect(m_playbackConsole, &PlaybackConsole::sigStopClicked, this, [this]() { if (m_audioEngine) m_audioEngine->stop(); if (m_playbackConsole) m_playbackConsole->resetToIdle(); if (m_progressBar) { m_progressBar->setProgress(0, 0); m_progressBar->setPlaybackState(false); } if (m_expandedPanel) m_expandedPanel->clearTrackData(); m_currentTrackIndex = -1; });
+    
+    connect(m_playbackConsole, &PlaybackConsole::sigStopClicked, this, [this]() {
+        if (m_audioEngine) m_audioEngine->stop();
+        if (m_playbackConsole) m_playbackConsole->resetToIdle();
+        if (m_progressBar) { m_progressBar->setProgress(0, 0); m_progressBar->setPlaybackState(false); }
+        if (m_expandedPanel) m_expandedPanel->clearTrackData();
+        m_currentTrackIndex = -1;
+        m_currentTrackTitle.clear();
+        updateWindowTitleState(false);
+
+        // 👑 停止播放時，如果春日影彩蛋還在，強制解除並恢復原狀
+        if (g_isHaruhikageActive) {
+            g_isHaruhikageActive = false;
+            QString savedBgPath = KaedeDatabase::instance().getConfig("custom_bg_path", "").toString();
+            QString normalBg = (!savedBgPath.isEmpty() && QFile::exists(savedBgPath)) ? savedBgPath : ":/img/BG.png";
+            if (m_fluidBg) m_fluidBg->setBackgroundImage(normalBg);
+            updateDominantColor(normalBg);
+        }
+    });
+    
     connect(m_playbackConsole, &PlaybackConsole::sigPrevClicked, this, &MainWindow::playPrevTrack); connect(m_playbackConsole, &PlaybackConsole::sigNextClicked, this, &MainWindow::playNextTrack);
     connect(m_playbackConsole, &PlaybackConsole::sigConsoleClicked, this, [this]() { if (m_isDspMode || m_isLibMode || m_isDspTransitioning) return; m_isExpandedPanelOpen = !m_isExpandedPanelOpen; if (m_expandedPanel) m_expandedPanel->animateToggle(m_playbackConsole->geometry()); });
     
-    // 👑 終極無縫並行動畫觸發點
     connect(m_playbackConsole, &PlaybackConsole::sigDspClicked, this, [this]() {
         if (m_isLibMode || m_isDspTransitioning) return; 
         
@@ -348,11 +555,18 @@ void MainWindow::setupUi() {
         m_isDspMode = !m_isDspMode;
         
         if (m_isDspMode) {
+            m_isSettingsBtnVisible = false;
+            m_settingsBtnHideTimer->stop();
+            if (m_btnSettingsAnim) {
+                m_btnSettingsAnim->stop();
+                m_btnSettingsAnim->setEndValue(QPoint(20, this->height() + 20));
+                m_btnSettingsAnim->start();
+            }
+
             if (m_analyzerPanel && m_analyzerPanel->isOpen()) m_analyzerPanel->closePanel();
             if (m_peqPanel && m_peqPanel->isOpen()) m_peqPanel->closePanel();
             if (m_libraryContainer) m_libraryContainer->setAttribute(Qt::WA_TransparentForMouseEvents, true);
             
-            // 同步呼叫內部深色玻璃特效，與主畫面的淡出疊加，效果更立體
             if (m_libraryPanel) m_libraryPanel->setDimMode(true);
             
             m_libFadeAnim->stop();
@@ -363,13 +577,11 @@ void MainWindow::setupUi() {
             if (m_progressBar) m_progressBar->setDspMode(true); 
             if (m_fluidBg) m_fluidBg->setSelectingState(true);
 
-            // 啟動主過渡（拔除了這裡愚蠢的 pre-show，將其延後到 updateDynamicLayout 處理）
             m_dspTransitionAnim->stop();
             m_dspTransitionAnim->setStartValue(m_dspProgress);
             m_dspTransitionAnim->setEndValue(1.0);
             m_dspTransitionAnim->start();
         } else {
-            // 收起時
             if (m_libraryContainer) {
                 m_libraryContainer->show(); 
                 m_libraryContainer->setAttribute(Qt::WA_TransparentForMouseEvents, false);
@@ -388,7 +600,6 @@ void MainWindow::setupUi() {
         }
     });
     
-    // 👑 保護傘：過渡期間直接 Drop 掉所有的 FFT 寫入請求，確保幀率平滑，絕不閃退
     connect(m_audioEngine, &KaedeAudioEngine::dspDataReady, this, [this](const std::vector<float>& pcm, const std::vector<float>& fft) { 
         if (!m_isDspTransitioning && m_dspPanel) {
             m_dspPanel->updateAudioData(pcm, fft); 
@@ -399,6 +610,24 @@ void MainWindow::setupUi() {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (watched == m_btnHoverSensor || watched == m_btnSettings) {
+        if (m_isDspMode) return QMainWindow::eventFilter(watched, event);
+
+        if (event->type() == QEvent::Enter) {
+            m_settingsBtnHideTimer->stop(); 
+            if (!m_isSettingsBtnVisible) {
+                m_isSettingsBtnVisible = true;
+                m_btnSettingsAnim->stop();
+                m_btnSettingsAnim->setStartValue(m_btnSettings->pos());
+                m_btnSettingsAnim->setEndValue(QPoint(20, this->height() - 56));
+                m_btnSettingsAnim->setEasingCurve(QEasingCurve::OutBack); 
+                m_btnSettingsAnim->start();
+            }
+        } else if (event->type() == QEvent::Leave) {
+            m_settingsBtnHideTimer->start(); 
+        }
+    }
+
     if (event->type() == QEvent::Resize) {
         if (QFrame* frame = qobject_cast<QFrame*>(watched)) {
             QPushButton* btnMin = frame->findChild<QPushButton*>("InjectedMinBtnFallback");
@@ -461,21 +690,31 @@ void MainWindow::updateDbStats() {
     if (m_dirList) { m_dirList->clear(); m_dirList->addItems(KaedeDatabase::instance().getMountedDirectories()); }
 }
 
-// 👑 完整補回：同時支援 DSP 與媒體庫面板的 Smoothstep 幾何動畫引擎
 void MainWindow::updateDynamicLayout() {
     int consoleW = width() * 0.8; if(consoleW > 1200) consoleW = 1200; if(consoleW < 700) consoleW = width() - 40;
     int consoleH = 80; int progW = consoleW - 30; int progH = 20;
     int normConsoleX = (width() - consoleW) / 2; int normConsoleY = height() - consoleH - 20; int normProgX = (width() - progW) / 2; int normProgY = normConsoleY - progH - 5;
 
-    if (m_btnSettings) { m_btnSettings->setGeometry(20, height() - 56, 80, 36); m_btnSettings->raise(); }
+    if (m_btnHoverSensor) {
+        m_btnHoverSensor->setGeometry(0, height() - 80, 120, 80);
+        m_btnHoverSensor->raise();
+    }
+    
+    if (m_btnSettings) {
+        m_btnSettings->raise();
+        if (!m_btnSettingsAnim || m_btnSettingsAnim->state() != QAbstractAnimation::Running) {
+            int currentY = m_isSettingsBtnVisible ? (height() - 56) : (height() + 20);
+            m_btnSettings->setGeometry(20, currentY, 80, 36);
+        }
+    }
+
     if (m_btnPeqToggle) { m_btnPeqToggle->setGeometry(width() - 95, normConsoleY + 2, 70, 36); m_btnPeqToggle->raise(); }
     if (m_btnAnalyzerToggle) { m_btnAnalyzerToggle->setGeometry(width() - 95, normConsoleY + 42, 70, 36); m_btnAnalyzerToggle->raise(); }
 
-    // 👑 案發現場：這裡把你遺失的媒體庫展開動畫補回來了！
     if (m_libProgress > 0.01) {
         if (m_libPanel) m_libPanel->show();
         double p = m_libProgress;
-        double ease_p = p * p * (3.0 - 2.0 * p); // 一樣上了高質感的 Smoothstep 曲線
+        double ease_p = p * p * (3.0 - 2.0 * p); 
 
         int curConsoleY = normConsoleY + (150 * ease_p);
         int curProgY = normProgY + (150 * ease_p);
@@ -487,9 +726,13 @@ void MainWindow::updateDynamicLayout() {
         int startY = height() + 50;
         int curLibY = startY + (targetY - startY) * ease_p;
 
-        if (m_libPanel->width() != targetW || m_libPanel->height() != targetH) m_libPanel->resize(targetW, targetH);
-        m_libPanel->move(targetX, curLibY);
-        m_libPanel->raise();
+        if (m_libPanel) {
+            if (m_libPanel->width() != targetW || m_libPanel->height() != targetH) {
+                m_libPanel->resize(targetW, targetH);
+            }
+            m_libPanel->move(targetX, curLibY);
+            m_libPanel->raise();
+        }
         m_titleBar->raise();
 
         if (m_playbackConsole) m_playbackConsole->setGeometry(normConsoleX, curConsoleY, consoleW, consoleH);
@@ -497,12 +740,11 @@ void MainWindow::updateDynamicLayout() {
         if (m_btnPeqToggle) m_btnPeqToggle->setGeometry(width() - 95, curConsoleY + 2, 70, 36);
         if (m_btnAnalyzerToggle) m_btnAnalyzerToggle->setGeometry(width() - 95, curConsoleY + 42, 70, 36);
 
-        return; // 展開圖書館時，中斷後續 DSP 佈局的運算
+        return; 
     } else {
         if (m_libPanel) m_libPanel->hide();
     }
 
-    // 👑 DSP 佈局區塊 (保持上一版的穩定狀態)
     int dspConsoleY = 50; int dspProgX = (width() - progW) / 2; int dspProgY = dspConsoleY + consoleH + 15;
     int curConsoleX = normConsoleX; int curConsoleY, curProgX, curProgY;
 
@@ -546,17 +788,69 @@ void MainWindow::moveEvent(QMoveEvent *event) {
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
-    if(m_fluidBg) m_fluidBg->setGeometry(this->rect()); 
-    if(m_libraryContainer) m_libraryContainer->setGeometry(this->rect()); 
+    QMainWindow::resizeEvent(event);
     
-    QPoint globalTopLeft = this->mapToGlobal(QPoint(0, 38)); int targetHeight = this->height() - 38;
-    if (m_settingsContainer) { m_settingsContainer->setGeometry(globalTopLeft.x() + this->width() - 380, globalTopLeft.y(), 380, targetHeight); if (m_isSettingsOpen) m_settingsPanel->setGeometry(0, 0, 380, targetHeight); else m_settingsPanel->setGeometry(380, 0, 380, targetHeight); }
-    if (m_analyzerPanel) { int consoleY = this->height() - 80 - 20; int pHeight = consoleY - 38 - 15; int pWidth = static_cast<int>(this->width() * 0.6); m_analyzerPanel->syncGeometry(QRect(globalTopLeft.x(), globalTopLeft.y(), pWidth, pHeight)); }
-    if (m_peqPanel) { int consoleY = this->height() - 80 - 20; int pHeight = consoleY - 38 - 15; int pWidth = static_cast<int>(this->width() * 0.4); int pLeft = this->width() - pWidth; m_peqPanel->syncGeometry(QRect(globalTopLeft.x() + pLeft, globalTopLeft.y(), pWidth, pHeight)); }
-    if (m_expandedPanel) m_expandedPanel->setGeometry(0, 0, width(), height() - 135); updateDynamicLayout(); QMainWindow::resizeEvent(event);
+    QRect safeRect = m_centralWidget ? m_centralWidget->rect() : this->rect();
+
+    if(m_fluidBg) m_fluidBg->setGeometry(safeRect); 
+    if(m_libraryContainer) m_libraryContainer->setGeometry(safeRect); 
+    
+    QPoint globalTopLeft = this->mapToGlobal(QPoint(0, 38)); 
+    int targetHeight = this->height() - 38;
+    
+    if (m_settingsContainer) { 
+        m_settingsContainer->setGeometry(globalTopLeft.x() + this->width() - 380, globalTopLeft.y(), 380, targetHeight); 
+        if (m_isSettingsOpen) m_settingsPanel->setGeometry(0, 0, 380, targetHeight); 
+        else m_settingsPanel->setGeometry(380, 0, 380, targetHeight); 
+    }
+    
+    if (m_analyzerPanel) { 
+        int consoleY = this->height() - 80 - 20; 
+        int pHeight = consoleY - 38 - 15; 
+        int pWidth = static_cast<int>(this->width() * 0.6); 
+        m_analyzerPanel->syncGeometry(QRect(globalTopLeft.x(), globalTopLeft.y(), pWidth, pHeight)); 
+    }
+    
+    if (m_peqPanel) { 
+        int consoleY = this->height() - 80 - 20; 
+        int pHeight = consoleY - 38 - 15; 
+        int pWidth = static_cast<int>(this->width() * 0.4); 
+        int pLeft = this->width() - pWidth; 
+        m_peqPanel->syncGeometry(QRect(globalTopLeft.x() + pLeft, globalTopLeft.y(), pWidth, pHeight)); 
+    }
+    
+    if (m_expandedPanel) m_expandedPanel->setGeometry(0, 0, width(), height() - 135); 
+    
+    QTimer::singleShot(0, this, [this]() {
+        updateDynamicLayout(); 
+    });
 }
 
-// 👑 完整補回：設定面板按鈕的色彩動態推播
+void MainWindow::changeEvent(QEvent *event) {
+    QMainWindow::changeEvent(event);
+    
+    if (event->type() == QEvent::WindowStateChange) {
+        QTimer::singleShot(200, this, [this]() {
+            if (!m_centralWidget || !m_fluidBg) return;
+            
+            QRect trueRect = m_centralWidget->rect();
+            
+            m_fluidBg->setGeometry(trueRect.adjusted(0, 0, 1, 1));
+            
+            QTimer::singleShot(10, this, [this, trueRect]() {
+                m_fluidBg->setGeometry(trueRect);
+                
+                #ifdef _WIN32
+                HWND hwnd = (HWND)this->winId();
+                RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW | RDW_ALLCHILDREN);
+                #endif
+                
+                updateDynamicLayout(); 
+            });
+        });
+    }
+}
+
 void MainWindow::animateWave(double progress) {
     if (m_currentTextColor == m_targetTextColor && m_currentBgColor == m_targetBgColor && progress < 1.0) return;
     double waveX = progress * (this->width() + 600.0) - 300.0; double waveWidth = 400.0;
@@ -568,13 +862,12 @@ void MainWindow::animateWave(double progress) {
         else if (qobject_cast<QLabel*>(w)) w->setStyleSheet(QString("color: %1; font-weight: bold; font-family: 'Consolas'; font-size: 13px; background: transparent;").arg(blendedFg.name()));
         else w->setStyleSheet(QString("QPushButton { background: rgba(255, 255, 255, 0.05); color: %1; border: 1px solid %2; border-radius: 4px; font-family: 'Segoe UI', 'Consolas'; font-weight: bold; letter-spacing: 1px; } QPushButton:hover { background: rgba(255, 255, 255, 0.15); color: #FFFFFF; } QPushButton:pressed { background: rgba(0, 0, 0, 0.4); }").arg(blendedFg.name(), ThemeManager::instance().border().name()));
     };
-    applyToWidget(m_titleBar->findChild<QLabel*>("TitleLabel"), false, false);
+    applyToWidget(m_titleLabel, false, false);
     applyToWidget(m_btnSettings, false, false);
     applyToWidget(m_btnMin, true, false);
     applyToWidget(m_btnMax, true, true);
     applyToWidget(m_btnClose, false, false);
 
-    // 👑 案發現場：這裡把你設定面板裡的按鈕補回來了！
     applyToWidget(m_btnSetBg, false, false);
     applyToWidget(m_btnClearBg, false, false);
     applyToWidget(m_btnLibConfig, false, false);
@@ -593,12 +886,42 @@ void MainWindow::animateWave(double progress) {
 
 void MainWindow::closeEvent(QCloseEvent *event) { if (m_audioEngine) m_audioEngine->destroy(); QMainWindow::closeEvent(event); }
 
+void MainWindow::setAndSaveCustomBackground(const QString& path) {
+    if (path.isEmpty() || !m_fluidBg) return;
+
+    QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/Backgrounds";
+    QDir dir(dataDir);
+    if (!dir.exists()) dir.mkpath(".");
+
+    QFileInfo srcInfo(path);
+    // 👑 絕殺機制：加入毫秒級時間戳，確保檔名絕對唯一，完美閃避 Windows 檔案鎖！
+    QString newPath = dataDir + "/custom_bg_" + QString::number(QDateTime::currentMSecsSinceEpoch()) + "." + srcInfo.suffix();
+
+    if (QFile::copy(path, newPath)) {
+        // 複製成功後，再來清理舊的緩存圖檔 (跳過剛存進去的這個新檔案)
+        QStringList filters; filters << "custom_bg_*";
+        QFileInfoList oldFiles = dir.entryInfoList(filters, QDir::Files);
+        for (const QFileInfo& info : oldFiles) {
+            if (info.absoluteFilePath() != newPath) {
+                QFile::remove(info.absoluteFilePath()); // 順手清垃圾，如果剛好被鎖著刪不掉也無所謂，下次導入就會自動清掉
+            }
+        }
+
+        KaedeDatabase::instance().setConfig("custom_bg_path", newPath);
+        g_isHaruhikageActive = false; // 👑 解除彩蛋鎖定
+        m_fluidBg->setBackgroundImage(newPath);
+        updateDominantColor(newPath);
+    } else {
+        // 萬一發生極端權限意外，退回直接讀取原圖
+        m_fluidBg->setBackgroundImage(path);
+        updateDominantColor(path);
+    }
+}
+
 void MainWindow::selectCustomBackground() { 
     QString path = QFileDialog::getOpenFileName(this, "Select Background Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)"); 
-    if (!path.isEmpty() && m_fluidBg) { 
-        // 👑 傳入原始路徑即可，GBBackgroundWidget 內部會自行處理 QUrl
-        m_fluidBg->setBackgroundImage(path); 
-        updateDominantColor(path); 
+    if (!path.isEmpty()) { 
+        setAndSaveCustomBackground(path); 
     } 
 }
 
@@ -608,8 +931,7 @@ void MainWindow::showImportDialog() {
         QStringList files = dialog.getImportedFiles(); 
         for (const QString& file : std::as_const(files)) { 
             if (file.endsWith(".png", Qt::CaseInsensitive) || file.endsWith(".jpg", Qt::CaseInsensitive) || file.endsWith(".webp", Qt::CaseInsensitive)) { 
-                if (m_fluidBg) m_fluidBg->setBackgroundImage(file); 
-                updateDominantColor(file); 
+                setAndSaveCustomBackground(file);
                 break; 
             } 
         } 
@@ -618,10 +940,11 @@ void MainWindow::showImportDialog() {
 
 void MainWindow::selectLibraryFolder() { QString dir = QFileDialog::getExistingDirectory(this, "Scan Music"); if(dir.isEmpty()) return; KaedeDatabase::instance().scanDirectory(dir); }
 
-
 void MainWindow::toggleSettingsMatrix() { 
     if (!m_settingsContainer || !m_settingsPanel || !m_settingsAnim) return; m_isSettingsOpen = !m_isSettingsOpen; int panelWidth = 380; QPoint globalTopLeft = this->mapToGlobal(QPoint(0, 38)); int targetHeight = this->height() - 38; m_settingsContainer->setGeometry(globalTopLeft.x() + this->width() - panelWidth, globalTopLeft.y(), panelWidth, targetHeight);
     if(m_isSettingsOpen) { m_settingsPanel->setGeometry(panelWidth, 0, panelWidth, targetHeight); m_settingsContainer->show(); m_settingsContainer->raise(); m_settingsAnim->setStartValue(QPoint(panelWidth, 0)); m_settingsAnim->setEndValue(QPoint(0, 0)); m_settingsAnim->start(); } else { m_settingsAnim->setStartValue(m_settingsPanel->pos()); m_settingsAnim->setEndValue(QPoint(panelWidth, 0)); m_settingsAnim->start(); }
 }
+
 void MainWindow::updateDominantColor(const QString& path) { if (!m_centralWidget) return; AdaptiveColorEngine::instance().extractColorFromImage(path); QColor newTargetTxt = AdaptiveColorEngine::instance().getTextColor(experimentalAdaptiveFontColor); QColor newTargetBg = AdaptiveColorEngine::instance().getPanelBackgroundColor(experimentalAdaptiveFontColor); if (newTargetTxt != m_targetTextColor || newTargetBg != m_targetBgColor) { m_targetTextColor = newTargetTxt; m_targetBgColor = newTargetBg; m_themeDelayTimer->start(2800); } }
+
 void MainWindow::toggleMaximize() { if(isMaximized()) { showNormal(); if (m_btnMax) m_btnMax->setText(QString::fromUtf8("\xE2\x96\xA1")); } else { showMaximized(); if (m_btnMax) m_btnMax->setText(QString::fromUtf8("\xE2\x9D\x90")); } }
