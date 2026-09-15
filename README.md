@@ -70,3 +70,74 @@
 ---
 
 ### 五段式音訊管線架構 (5-Stage Pipeline)
+
+[ 音訊解碼輸入 Audio Decoding ]
+│  支援 FLAC / WAV / MP3 / DSF / DFF (Native DSD 1-Bit Bitstream)
+▼
+[ 階段 01 · 頻譜頻寬擴展 Spectral BWE ]
+│  高頻諧波補全 · 奈奎斯特斷崖修復 · 基頻物理隔離直通
+▼
+[ 階段 02 · 數位增益與耳機聲場空間化 Pre-Gain & Crossfeed ]
+│  浮點 Headroom 增益校準 · 立體聲耳機雙耳效應交叉饋送
+▼
+[ 階段 03 · 矩陣式高精度等化器 Parametric EQ ]
+│  64-bit 雙精度濾波矩陣 · 最小相位 / 線性相位頻率校正
+▼
+[ 階段 04 · 多相 FIR 重採樣矩陣 Polyphase Resampler ]
+│  SDP-FIR / Zenith DPSS (至 131,072 Taps) / APK / CAMFIR (動態 Morph)
+▼
+[ 階段 05 · 調變與位元流輸出 Modulation & Quantization ]
+│  高階 Sigma-Delta (SDM) 調變器 · 聽覺感知噪聲整形與抖動處理
+▼
+[ 硬體直通輸出 Hardware Output ]
+├─ Direct In-Proc ASIO (0 Hz 時脈偏差鎖定)
+└─ WASAPI Exclusive Mode (獨占端點直通)
+
+遙測 tap-off：全鏈路遙測數據經由 Lock-free Ring Buffer 輸出至 Qt RHI GPU HUD
+
+---
+
+### 系統規格與執行環境
+
+<details>
+<summary><b>硬體與環境需求</b></summary>
+<br/>
+
+| 項目類別 | 規格要求 |
+| :--- | :--- |
+| **作業系統** | Windows 10 / Windows 11 (64-bit) |
+| **處理器架構** | x86-64 現代架構（需完整支援 AVX2 與 FMA3 向量指令集） |
+| **圖形硬體** | 支援 Direct3D 11 / Direct3D 12 或 Vulkan 1.2+ 之 GPU |
+| **音訊硬體** | 支援 ASIO 2.0+ 或 WASAPI 獨占模式的外接 USB DAC、PCIe 音效卡 |
+| **支援格式** | PCM (FLAC, WAV, MP3 等，最高 768 kHz / 32-bit)、DSD (DSF, DFF, 支援 Native DSD) |
+
+</details>
+
+<details>
+<summary><b>多語言支援 (Localization)</b></summary>
+<br/>
+
+| 語言代碼 | 語言名稱 | 涵蓋範圍 |
+| :--- | :--- | :--- |
+| `zh_TW` | 正體中文 | 完整介面 · DSP 矩陣控制面板 · 遙測 HUD · 技術說明 |
+| `zh_CN` | 简体中文 | 完整界面 · DSP 矩阵控制面板 · 遥测 HUD · 技术说明 |
+| `ja_JP` | 日本語 | フルUI · DSPマトリクス設定 · テレメトリHUD · 技術仕様 |
+| `en_US` | English | Full UI · DSP Matrix Panel · Telemetry HUD · Specs |
+
+</details>
+
+---
+
+### 支持與贊助 (Sponsorship)
+
+Kaede Player 是一項獨立架構的非商業/開源音訊工程專案。如果你認同本專案對極致重播精度與 DSP 演算法的探索，歡迎透過愛發電支持後續的演算法研發、算力維護與功能反覆運算：
+
+[![Afdian](https://img.shields.io/badge/Afdian-贊助作者支持開發-946ce6?style=for-the-badge&logo=kofi&logoColor=white)](https://afdian.com/a/kaedeNKD?utm_source=copylink&utm_medium=link)
+
+*特別贊助者將於後續版本與 V3 商業化進程中，永久銘刻於專案關於視窗與鳴謝名單。*
+
+---
+
+<div align="center">
+<sub>Designed and Developed by KaedeNKD · Audio DSP & Systems Architecture</sub>
+</div>
