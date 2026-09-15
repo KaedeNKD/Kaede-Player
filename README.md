@@ -68,35 +68,6 @@
 </table>
 
 ---
-
-### 五段式音訊管線架構 (5-Stage Pipeline)
-
-[ 音訊解碼輸入 Audio Decoding ]
-│  支援 FLAC / WAV / MP3 / DSF / DFF (Native DSD 1-Bit Bitstream)
-▼
-[ 階段 01 · 頻譜頻寬擴展 Spectral BWE ]
-│  高頻諧波補全 · 奈奎斯特斷崖修復 · 基頻物理隔離直通
-▼
-[ 階段 02 · 數位增益與耳機聲場空間化 Pre-Gain & Crossfeed ]
-│  浮點 Headroom 增益校準 · 立體聲耳機雙耳效應交叉饋送
-▼
-[ 階段 03 · 矩陣式高精度等化器 Parametric EQ ]
-│  64-bit 雙精度濾波矩陣 · 最小相位 / 線性相位頻率校正
-▼
-[ 階段 04 · 多相 FIR 重採樣矩陣 Polyphase Resampler ]
-│  SDP-FIR / Zenith DPSS (至 131,072 Taps) / APK / CAMFIR (動態 Morph)
-▼
-[ 階段 05 · 調變與位元流輸出 Modulation & Quantization ]
-│  高階 Sigma-Delta (SDM) 調變器 · 聽覺感知噪聲整形與抖動處理
-▼
-[ 硬體直通輸出 Hardware Output ]
-├─ Direct In-Proc ASIO (0 Hz 時脈偏差鎖定)
-└─ WASAPI Exclusive Mode (獨占端點直通)
-
-遙測 tap-off：全鏈路遙測數據經由 Lock-free Ring Buffer 輸出至 Qt RHI GPU HUD
-
----
-
 ### 系統規格與執行環境
 
 <details>
