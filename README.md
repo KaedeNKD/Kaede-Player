@@ -2,16 +2,17 @@
 
 # KAEDE PLAYER V2
 
-**高精度發燒音訊播放器 · 原生硬體直通串流架構**
+**高精度本機音訊重播引擎 · 原生硬體直通與多核 DSP 管線架構**
 
 [![Latest Release](https://img.shields.io/github/v/release/KaedeNKD/Kaede-Player?style=for-the-badge&logo=github&logoColor=white&color=38B2CE)](https://github.com/KaedeNKD/Kaede-Player/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Windows_x64-22272E?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/KaedeNKD/Kaede-Player)
-[![Graphics Acceleration](https://img.shields.io/badge/Graphics-全硬體_GPU_加速-41CD52?style=for-the-badge&logo=nvidia&logoColor=white)](https://github.com/KaedeNKD/Kaede-Player)
+[![Graphics Acceleration](https://img.shields.io/badge/Rendering-Qt_RHI_(D3D11%2F12%20%2F%20Vulkan)-41CD52?style=for-the-badge&logo=vulkan&logoColor=white)](https://github.com/KaedeNKD/Kaede-Player)
 [![Vectorization](https://img.shields.io/badge/Vectorization-AVX2_%2B_FMA3-D97706?style=for-the-badge)](https://github.com/KaedeNKD/Kaede-Player)
+[![Afdian Sponsor](https://img.shields.io/badge/Sponsor-愛發電-946ce6?style=for-the-badge&logo=kofi&logoColor=white)](https://afdian.com/a/kaedeNKD?utm_source=copylink&utm_medium=link)
 
 <p align="center">
-  專為追求純淨音質與極致重播精度所打造的 Windows 音訊播放器。<br/>
-  融合硬體級位元完美直通、高頻動態聲學重構引擎與全硬體加速流暢介面。
+  專為極限重播精度打造的現代 Windows 音訊播放器。<br/>
+  結合底層硬體直通管線、多演算法高階 FIR 重採樣陣列與零 CPU 佔用 GPU 圖形遙測。
 </p>
 
 </div>
@@ -19,143 +20,53 @@
 ---
 
 > [!NOTE]
-> **純淨音訊重播哲學**<br/>
-> Kaede Player 採用原生硬體驅動直通與高精度 64 位元浮點運算架構，徹底繞過 Windows 系統混音器的染色與壓縮，還原錄音室母帶級的真實聲學動態。
+> **架構設計原則**<br/>
+> Kaede Player 全鏈路採用 64-bit 雙精度浮點運算與進程內原生驅動直通，徹底繞過 Windows Audio Session API 共享混音器與系統 SRC（採樣率轉換），保證音訊串流在時間域與頻率域的位元完整性（Bit-Perfect）。
 
 ---
 
-### 核心功能與特色
+### 核心系統架構與特性
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <b>01 · 原生硬體直通 (Bit-Perfect)</b>
+      <b>01 · 原生硬體直通管線 (Bit-Perfect Pipeline)</b>
       <br/><br/>
-      • <b>ASIO 驅動原生直通</b>: 直接調用硬體驅動，支援最高 768 kHz PCM 與 Native DSD 點對點無損傳輸。<br/>
-      • <b>實時硬體時脈審計</b>: 具備硬體時脈檢驗機制，確保 0 Hz 時脈偏差與絕對精確度。<br/>
-      • <b>WASAPI 獨占管線</b>: 鎖定硬體音訊端點，徹底杜絕系統重採樣與音質劣質化。
+      • <b>ASIO 2.0+ 原生直調用</b>: 直接與音訊硬體驅動溝通，支援最高 768 kHz PCM 與 Native DSD 點對點傳輸。<br/>
+      • <b>實時硬體時脈審計 (Clock Audit)</b>: 內建硬體時脈漂移監控機制，確保 0 Hz 時脈偏差與時間戳精確對齊。<br/>
+      • <b>WASAPI 獨占端點 (Exclusive Mode)</b>: 鎖定底層音訊端點，消除系統層混音染色與緩衝區抖動。
     </td>
     <td width="50%" valign="top">
-      <b>02 · 類神經頻譜空氣感重構 (Spectral BWE)</b>
+      <b>02 · 頻譜頻寬擴展與動態防護 (Spectral BWE)</b>
       <br/><br/>
-      • <b>高頻動態智慧修復</b>: 針對壓縮音軌及標準 CD 音源，智慧補齊被切除的超高頻泛音與空氣感。<br/>
-      • <b>原生基頻完全直通</b>: 嚴格物理頻帶隔離技術，人聲與樂器基音 100% 保持原始位元純淨度。<br/>
-      • <b>防過載防爆音保護</b>: 針對高度壓限的流行樂音軌主動優化動態，杜絕數位削波破音。
+      • <b>頻譜頻寬擴展 (BWE)</b>: 針對受限音軌重建高頻諧波與能量分佈，補齊奈奎斯特頻率截斷邊界。<br/>
+      • <b>物理頻帶隔離</b>: 基頻與人聲主頻帶 100% 直通處理，杜絕相位調製失真。<br/>
+      • <b>True Peak 浮點防削波</b>: 64 位元浮點 Headroom 管理搭配低失真軟限幅，防止高電平音軌數位溢位破音。
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <b>03 · 發燒級重採樣與 1-Bit DSD 調變</b>
+      <b>03 · 多核 FIR 重採樣與高階調變 (Resampling & SDM)</b>
       <br/><br/>
-      • <b>超高階 Alien-FIR 濾波</b>: 具備線性相位與零前置振鈴等多種高保真重採樣模式。<br/>
-      • <b>1-Bit 高階 DSD 調變器</b>: 將 PCM 音訊即時調變為細膩流暢的脈衝流輸出。<br/>
-      • <b>聽覺感知噪聲整形</b>: 結合人耳聽覺特性優化動態背景，呈現深邃漆黑的聲音底色。
+      • <b>四大數學濾波核</b>:
+        <br/>&emsp;– <b>SDP-FIR</b>: 凸優化線性相位，極致帶外衰減。
+        <br/>&emsp;– <b>Zenith DPSS</b>: Slepian 離散長橢球序列最優窗，動態分配最高 131,072 Taps。
+        <br/>&emsp;– <b>APK</b>: 非對稱時域遮蔽，消除人耳敏感的前置振鈴（Pre-ringing）。
+        <br/>&emsp;– <b>CAMFIR</b>: 內容自適應動態混合，支援即時 Morph Ratio 連續形變。
+      <br/>
+      • <b>AVX2 / FMA3 向量加速</b>: 多相濾波（Polyphase）核心指令集優化，維持極低延遲。<br/>
+      • <b>高階 Sigma-Delta (SDM) 調變</b>: 整合聽覺加權噪聲整形（Noise Shaping），將量化噪聲推移至可聽頻段之外。
     </td>
     <td width="50%" valign="top">
-      <b>04 · 全硬體加速與絲滑媒體庫</b>
+      <b>04 · 零 CPU 繪圖開銷與現代媒體庫 (RHI Engine)</b>
       <br/><br/>
-      • <b>0% CPU 圖形負擔</b>: 動態介面與聲學分析儀完全由 GPU 運算，不搶佔音樂播放資源。<br/>
-      • <b>海量曲庫極速瀏覽</b>: 具備非同步封面加載管線，上萬首音軌滑動瀏覽穩定鎖定高更新率 (144Hz+)。<br/>
-      • <b>高自由度標籤排序</b>: 支援自訂表達式與多維度標籤分類，輕鬆管理大型音樂庫。
+      • <b>Qt RHI 硬體渲染</b>: 圖形後端支援 Direct3D 11/12 與 Vulkan，頻譜分析與 UI 運算 100% 卸載至 GPU。<br/>
+      • <b>無鎖非同步遙測 (Lock-Free Telemetry)</b>: 即時聲學 HUD 透過環形緩衝區與音訊執行緒解耦，完全不佔用 DSP 算力。<br/>
+      • <b>虛擬化媒體庫引擎</b>: 支援非同步封面快取與多維度元數據過濾，萬首曲庫捲動穩定鎖定高更新率 (144Hz+)。
     </td>
   </tr>
 </table>
 
 ---
 
-### 音訊處理架構
-
-<div align="center">
-
-<table width="100%">
-  <tr>
-    <td align="center">
-      <b>音訊解碼輸入 (AUDIO INPUT)</b><br/>
-      <code>FLAC</code> · <code>WAV</code> · <code>DSF / DFF (Native DSD)</code> · <code>MP3</code>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">↓</td>
-  </tr>
-  <tr>
-    <td>
-      <b>01 · 類神經頻譜空氣感重構引擎 (NEURAL SPECTRAL BWE)</b><br/>
-      <sub>自動鑑別音軌格式，修復高頻斷崖並拓展立體音場，同時保證原始人聲與基頻絕對純淨。</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">↓</td>
-  </tr>
-  <tr>
-    <td>
-      <b>02 · 數位主增益與耳機聲場空間化 (PRE-GAIN & CROSSFEED)</b><br/>
-      <sub>立體聲耳機交叉饋送優化，消除長時間耳機聆聽的壓迫感與頭中效應。</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">↓</td>
-  </tr>
-  <tr>
-    <td>
-      <b>03 · 高精度參數化等化器 (PARAMETRIC EQ)</b><br/>
-      <sub>高精確度即時濾波器矩陣，提供精準細膩的頻率響應校正。</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">↓</td>
-  </tr>
-  <tr>
-    <td>
-      <b>04 · 重採樣與高階調變後端 (RESAMPLING & MODULATION)</b><br/>
-      <sub>發燒級多相 Sinc 插值濾波與高階 1-Bit 脈衝調變輸出。</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">↓</td>
-  </tr>
-  <tr>
-    <td align="center">
-      <b>硬體串流輸出 (HARDWARE OUTPUT)</b><br/>
-      <code>Direct In-Proc ASIO (0 Hz 時脈偏差)</code> · <code>WASAPI 獨占模式</code>
-    </td>
-  </tr>
-</table>
-
-</div>
-
----
-
-### 系統支援與規格
-
-<details>
-<summary><b>點擊查看系統環境需求與音訊支援</b></summary>
-<br/>
-
-| 項目類別 | 規格說明 |
-| :--- | :--- |
-| **作業系統** | Windows 10 / 11 (64-bit) |
-| **處理器需求** | 支援 AVX2 與 FMA3 向量指令集之現代 64 位元處理器 |
-| **圖形加速** | 全硬體 GPU 加速渲染 (Direct3D 11, Direct3D 12, Vulkan) |
-| **音訊支援** | ASIO 2.0+ 原生設備、WASAPI 獨占支援之各類外接 DAC 與音效卡 |
-| **音訊格式** | DSD (DSF, DFF), FLAC, WAV, MP3 等主流無損與壓縮格式 |
-
-</details>
-
-<details>
-<summary><b>點擊查看多語言支援</b></summary>
-<br/>
-
-| 語言 | 支援範圍 |
-| :--- | :--- |
-| **正體中文 (繁體)** | 完整支援 (核心介面 · 聲學儀表 · 說明指南) |
-| **简体中文** | 完整支援 (核心界面 · 声学仪表 · 说明指南) |
-| **日本語** | 完整支援 (コアUI · アナライザー · 技術ガイド) |
-| **English** | 完整支援 (Native UI) |
-
-</details>
-
----
-
-<div align="center">
-<sub>Designed and Developed by KaedeNKD · High-Precision Audio Engineering</sub>
-</div>
+### 五段式音訊管線架構 (5-Stage Pipeline)
