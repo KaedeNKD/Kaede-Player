@@ -2,110 +2,112 @@
 
 # KAEDE PLAYER V2
 
-**高精度本機音訊重播引擎 · 原生硬體直通與多核 DSP 管線架構**
+**高精度本機音訊重播架構 · 原生硬體直通與 212-bit 非 LTI 數值管線**
 
-[![Latest Release](https://img.shields.io/github/v/release/KaedeNKD/Kaede-Player?style=for-the-badge&logo=github&logoColor=white&color=38B2CE)](https://github.com/KaedeNKD/Kaede-Player/releases/latest)
+[![Version](https://img.shields.io/badge/Version-v2.9.5-38B2CE?style=for-the-badge)](https://github.com/KaedeNKD/Kaede-Player/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Windows_x64-22272E?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/KaedeNKD/Kaede-Player)
-[![Graphics Acceleration](https://img.shields.io/badge/Rendering-Qt_RHI_(D3D11%2F12%20%2F%20Vulkan)-41CD52?style=for-the-badge&logo=vulkan&logoColor=white)](https://github.com/KaedeNKD/Kaede-Player)
-[![Vectorization](https://img.shields.io/badge/Vectorization-AVX2_%2B_FMA3-D97706?style=for-the-badge)](https://github.com/KaedeNKD/Kaede-Player)
-[![Afdian Sponsor](https://img.shields.io/badge/Sponsor-愛發電-946ce6?style=for-the-badge&logo=kofi&logoColor=white)](https://afdian.com/a/kaedeNKD?utm_source=copylink&utm_medium=link)
+[![Graphics Backend](https://img.shields.io/badge/Graphics-Qt_RHI_(D3D11%2F12%20%7C%20Vulkan)-41CD52?style=for-the-badge&logo=vulkan&logoColor=white)](https://github.com/KaedeNKD/Kaede-Player)
+[![SIMD Acceleration](https://img.shields.io/badge/Instruction-AVX2_%2B_FMA3-D97706?style=for-the-badge)](https://github.com/KaedeNKD/Kaede-Player)
+[![Sponsorship](https://img.shields.io/badge/Sponsor-Afdian-946ce6?style=for-the-badge)](https://afdian.com/a/kaedeNKD?utm_source=copylink&utm_medium=link)
 
 <p align="center">
-  專為極限重播精度打造的現代 Windows 音訊播放器。<br/>
-  結合底層硬體直通管線、多演算法高階 FIR 重採樣陣列與零 CPU 佔用 GPU 圖形遙測。
+  專為極限重播精度打造的 Windows 音訊播放環境。<br/>
+  結合位元完美硬體直通、212-bit 超雙精度多相濾波陣列、非 LTI 連續力學動態與零 CPU 繪圖開銷遙測。
 </p>
 
 </div>
 
 ---
 
-> [!NOTE]
-> **架構設計原則**<br/>
-> Kaede Player 全鏈路採用 64-bit 雙精度浮點運算與進程內原生驅動直通，徹底繞過 Windows Audio Session API 共享混音器與系統 SRC（採樣率轉換），保證音訊串流在時間域與頻率域的位元完整性（Bit-Perfect）。
+### 設計準則
+
+Kaede Player 採用進程內驅動直通與全鏈路高精度運算架構。系統徹底繞過 Windows Audio Session (WASAPI) 共享混音器、系統級 SRC（Sample Rate Converter）與作業系統音量衰減器，杜絕非整數倍重採樣引發的互調失真與時間域相位扭曲，確保 DAC 硬體接收到位元完整（Bit-Perfect）的音訊資料。
 
 ---
 
-### 核心系統架構與特性
+### 核心子系統
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <b>01 · 原生硬體直通管線 (Bit-Perfect Pipeline)</b>
+      <b>01 · 原生硬體直通與虛擬橋接</b>
       <br/><br/>
-      • <b>ASIO 2.0+ 原生直調用</b>: 直接與音訊硬體驅動溝通，支援最高 768 kHz PCM 與 Native DSD 點對點傳輸。<br/>
-      • <b>實時硬體時脈審計 (Clock Audit)</b>: 內建硬體時脈漂移監控機制，確保 0 Hz 時脈偏差與時間戳精確對齊。<br/>
-      • <b>WASAPI 獨占端點 (Exclusive Mode)</b>: 鎖定底層音訊端點，消除系統層混音染色與緩衝區抖動。
+      • <b>ASIO 2.0+ / WASAPI 獨占直通</b>：跳過作業系統音訊引擎，支援最高 768 kHz PCM 與 Native DSD1024 點對點無損輸出。<br/>
+      • <b>硬體時脈審計與單調對齊</b>：高精度 QPC 硬體計時器與 DAC 實體發聲時鐘嚴密同步，杜絕播放時間漂移與取樣累積誤差。<br/>
+      • <b>Kaede Virtual ASIO 影子橋接</b>：內建進程間低延遲共享記憶體（IPC），允許外部 DAW（Cubase, REAPER 等）將音訊串流直接注入播放器 DSP 管線。
     </td>
     <td width="50%" valign="top">
-      <b>02 · 頻譜頻寬擴展與動態防護 (Spectral BWE)</b>
+      <b>02 · 212-bit 極限精度與非 LTI 重採樣</b>
       <br/><br/>
-      • <b>頻譜頻寬擴展 (BWE)</b>: 針對受限音軌重建高頻諧波與能量分佈，補齊奈奎斯特頻率截斷邊界。<br/>
-      • <b>物理頻帶隔離</b>: 基頻與人聲主頻帶 100% 直通處理，杜絕相位調製失真。<br/>
-      • <b>True Peak 浮點防削波</b>: 64 位元浮點 Headroom 管理搭配低失真軟限幅，防止高電平音軌數位溢位破音。
+      • <b>212-bit 極限數值精度</b>：核心重採樣卷積與連續微積分全域運行於 212-bit 超雙精度管線，消除長鏈路運算累積的中繼捨入截斷雜訊。<br/>
+      • <b>破除 LTI 靜態假設</b>：揚棄傳統音訊 DSP 依賴線性時不變（LTI）系統的僵化框架，引入連續力學動態，針對瞬態衝擊進行微觀自適應演化，兼具衝激定位與零時域模糊。<br/>
+      • <b>多相 FIR 與高階 SDM 調變</b>：最高 131,072 Taps，帶外阻帶衰減低於 -180 dBFS；內建最高 15 階閉環調變器，支援將 PCM 即時升頻至 DSD1024。
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <b>03 · 多核 FIR 重採樣與高階調變 (Resampling & SDM)</b>
+      <b>03 · 聲學防護與空間拓撲矩陣</b>
       <br/><br/>
-      • <b>四大數學濾波核</b>:
-        <br/>&emsp;– <b>SDP-FIR</b>: 凸優化線性相位，極致帶外衰減。
-        <br/>&emsp;– <b>Zenith DPSS</b>: Slepian 離散長橢球序列最優窗，動態分配最高 131,072 Taps。
-        <br/>&emsp;– <b>APK</b>: 非對稱時域遮蔽，消除人耳敏感的前置振鈴（Pre-ringing）。
-        <br/>&emsp;– <b>CAMFIR</b>: 內容自適應動態混合，支援即時 Morph Ratio 連續形變。
-      <br/>
-      • <b>AVX2 / FMA3 向量加速</b>: 多相濾波（Polyphase）核心指令集優化，維持極低延遲。<br/>
-      • <b>高階 Sigma-Delta (SDM) 調變</b>: 整合聽覺加權噪聲整形（Noise Shaping），將量化噪聲推移至可聽頻段之外。
+      • <b>True Peak 浮點防削波防線</b>：64-bit 浮點 Headroom 管理搭配高動態餘量軟限幅，徹底防止高電平音軌或重採樣產生的採樣間峰值破音。<br/>
+      • <b>頻譜頻寬擴展 (BWE)</b>：基頻與人聲主頻帶維持 100% 物理直通，僅對截斷邊界進行物理頻帶隔離的高頻諧波能量重構。<br/>
+      • <b>ITU-R BS.775 多聲道等功率下混</b>：多聲道影片與音訊支援 64-bit FMA 矩陣下混為純淨立體聲，或透過次世代演算法上混至多聲道配置。
     </td>
     <td width="50%" valign="top">
-      <b>04 · 零 CPU 繪圖開銷與現代媒體庫 (RHI Engine)</b>
+      <b>04 · D3D11VA 全景影院與跨端遙控</b>
       <br/><br/>
-      • <b>Qt RHI 硬體渲染</b>: 圖形後端支援 Direct3D 11/12 與 Vulkan，頻譜分析與 UI 運算 100% 卸載至 GPU。<br/>
-      • <b>無鎖非同步遙測 (Lock-Free Telemetry)</b>: 即時聲學 HUD 透過環形緩衝區與音訊執行緒解耦，完全不佔用 DSP 算力。<br/>
-      • <b>虛擬化媒體庫引擎</b>: 支援非同步封面快取與多維度元數據過濾，萬首曲庫捲動穩定鎖定高更新率 (144Hz+)。
+      • <b>KCM 全景影院艙</b>：整合 D3D11VA 硬體解碼，支援 4K 10-bit HDR/BT.2020 影片播放，具備 ASS/SSA 雙語字幕智慧切分與高解析度點陣排版。<br/>
+      • <b>Qt RHI 零 CPU 繪圖開銷</b>：UI 與即時頻譜/相位雷達 100% 卸載至 GPU（D3D11/12 或 Vulkan），保證百萬首曲庫以 144Hz+ 流暢捲動。<br/>
+      • <b>局域網 Web Remote</b>：內建 HTTP/WebSocket 遙控伺服器，支援行動端瀏覽器 60FPS 本地時脈平滑外推、手勢切換與存取權限控制。
     </td>
   </tr>
 </table>
 
 ---
-### 系統規格與執行環境
 
-<details>
-<summary><b>硬體與環境需求</b></summary>
-<br/>
+### 技術規格與運算精度
 
-| 項目類別 | 規格要求 |
-| :--- | :--- |
-| **作業系統** | Windows 10 / Windows 11 (64-bit) |
-| **處理器架構** | x86-64 現代架構（需完整支援 AVX2 與 FMA3 向量指令集） |
-| **圖形硬體** | 支援 Direct3D 11 / Direct3D 12 或 Vulkan 1.2+ 之 GPU |
-| **音訊硬體** | 支援 ASIO 2.0+ 或 WASAPI 獨占模式的外接 USB DAC、PCIe 音效卡 |
-| **支援格式** | PCM (FLAC, WAV, MP3 等，最高 768 kHz / 32-bit)、DSD (DSF, DFF, 支援 Native DSD) |
-
-</details>
-
-<details>
-<summary><b>多語言支援 (Localization)</b></summary>
-<br/>
-
-| 語言代碼 | 語言名稱 | 涵蓋範圍 |
+| 項目模組 | 運算精度 / 實現規範 | 效能與硬體指標 |
 | :--- | :--- | :--- |
-| `zh_TW` | 正體中文 | 完整介面 · DSP 矩陣控制面板 · 遙測 HUD · 技術說明 |
-| `zh_CN` | 简体中文 | 完整界面 · DSP 矩阵控制面板 · 遥测 HUD · 技术说明 |
-| `ja_JP` | 日本語 | フルUI · DSPマトリクス設定 · テレメトリHUD · 技術仕様 |
-| `en_US` | English | Full UI · DSP Matrix Panel · Telemetry HUD · Specs |
-
-</details>
+| **運算數值精度** | 212-bit Quad-Double / 64-bit 雙精度浮點數 | 理論數值底噪低於 -600 dBFS 等效動態範圍 |
+| **系統建模範式** | 突破傳統 LTI 假定之連續力學動態 | 消除傳統高階濾波器的時域擴散與衝激模糊 |
+| **向量指令集加速** | AVX2 + FMA3 (256-bit SIMD 暫存器常駐) | 運算密集區段無棧記憶體往返，確保即時重播零掉幀 |
+| **多相重採樣 (FIR)** | 多精度多相卷積 / 最高 131,072 Taps | 阻帶衰減: < -180 dBFS · 4 種相位響應模式可選 |
+| **Sigma-Delta 調變** | 5 階 / 8 階 / 15 階 CIFF 閉環調變結構 | 支援 DSD64 至 DSD1024 (2.82 MHz ~ 45.15 MHz) 即時輸出 |
+| **輸出傳輸模式** | ASIO 2.0+ (Native DSD / DoP) / WASAPI 獨占直通 | 位元完美直通，音訊時鐘與 QPC 硬體同步 |
+| **虛擬音效卡橋接** | Kaede Virtual ASIO (進程間共享記憶體 IPC) | 核心傳輸延遲: < 1.2 ms，支援外部 DAW 串流直灌 |
+| **視訊硬體加速** | Direct3D 11 Video Acceleration (D3D11VA) | 支援 4K H.264 / HEVC 10-bit P010 及多軌字幕智慧切分 |
+| **圖形遙測管線** | Qt Rendering Hardware Interface (RHI) | D3D11 / D3D12 / Vulkan 直調用，0% CPU 音訊執行緒佔用 |
 
 ---
 
-### 支持與贊助 (Sponsorship)
+### 系統環境要求
 
-Kaede Player 是一項獨立架構的非商業/開源音訊工程專案。如果你認同本專案對極致重播精度與 DSP 演算法的探索，歡迎透過愛發電支持後續的演算法研發、算力維護與功能反覆運算：
+* **作業系統**：Windows 10 / Windows 11 (64-bit)
+* **處理器**：x86-64 架構處理器，**必須**完整支援 AVX2 與 FMA3 指令集（Intel 4 代 Core / AMD Zen 1 及更高階架構）
+* **圖形處理器**：支援 Direct3D 11、Direct3D 12 或 Vulkan 1.2+ 之顯示卡
+* **音訊介面**：支援 ASIO 2.0+ 驅動或 WASAPI Exclusive 獨占模式的外接 USB DAC、PCIe 專業音效卡
+* **支援格式**：
+  * **音訊**：FLAC, WAV, MP3, M4A, AAC, DSF, DFF（支援 Native DSD 1024 Max / DoP DSD128 - 256 Max）
+  * **視訊**：MKV, MP4, MOV, WEBM, AVI（支援 ASS, SSA, SRT, VTT 內嵌與外掛字幕）
 
-[![Afdian](https://img.shields.io/badge/Afdian-贊助作者支持開發-946ce6?style=for-the-badge&logo=kofi&logoColor=white)](https://afdian.com/a/kaedeNKD?utm_source=copylink&utm_medium=link)
+---
 
-*特別贊助者將於後續版本與 V3 商業化進程中，永久銘刻於專案關於視窗與鳴謝名單。*
+### 多語言支援 (Localization)
+
+| 語言代碼 | 語言名稱 | 涵蓋範圍 |
+| :--- | :--- | :--- |
+| `zh_TW` | 繁體中文 | 完整介面 · DSP 矩陣控制面板 · 遙測 HUD · 影院控制台 |
+| `zh_CN` | 简体中文 | 完整界面 · DSP 矩阵控制面板 · 遥测 HUD · 影院控制台 |
+| `ja_JP` | 日本語 | フルUI · DSPマトリクス設定 · テレメトリHUD · シネマコンソール |
+| `en_US` | English | Complete UI · DSP Matrix Panel · Telemetry HUD · Cinema Console |
+
+---
+
+### 贊助與支援 (Sponsorship)
+
+Kaede Player 是一項聚焦於極限重播精度與音訊演算法實踐的獨立工程專案。如果你認同本專案對位元完美硬體直通、212-bit 數值管線與零 CPU 繪圖開銷的工程實踐，歡迎透過愛發電支持後續的演算法優化與維護：
+
+[![Afdian](https://img.shields.io/badge/Afdian-贊助作者支持開發-946ce6?style=for-the-badge)](https://afdian.com/a/kaedeNKD?utm_source=copylink&utm_medium=link)
 
 ---
 
